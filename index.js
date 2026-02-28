@@ -883,8 +883,8 @@ async function TestGPTProcess() {
         
         // Delay between loop iterations to reduce GPT calls
         if (iterationNum < iterationCount) {
-          const waitMs = cliConfig.fast ? 5000 : 300000; // 5 seconds (--fast) or 5 minutes (default)
-          const waitLabel = cliConfig.fast ? '5 seconds' : '5 minutes';
+          const waitMs = cliConfig.fast ? 5000 : 150000; // 5 seconds (--fast) or 5 minutes (default)
+          const waitLabel = cliConfig.fast ? '5 seconds' : '2.5 minutes';
           logger.log(`[LOOP] Waiting ${waitLabel} before next iteration...`);
           await new Promise(r => setTimeout(r, waitMs));
         }
