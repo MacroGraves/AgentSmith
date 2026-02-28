@@ -180,15 +180,15 @@ class MarketAnalysis {
     if (trend === 'UPTREND' && strength.includes('STRONG')) {
       return 'SELL opportunity if holding (strong uptrend, good exit point)';
     } else if (trend === 'UPTREND') {
-      return 'HOLD or SELL if profit target met (uptrend, wait for stronger signal to buy)';
+      return 'HOLD or SELL if profit target met (uptrend, consider taking profits)';
     } else if (trend === 'DOWNTREND' && pctChange < -5) {
-      return 'WAIT - steep decline in progress, do NOT buy into a crash. Avoid selling at a loss.';
+      return 'BUY opportunity - steep decline may be near bottom. Use small position size. Do NOT sell at a loss.';
     } else if (trend === 'DOWNTREND' && strength.includes('WEAK')) {
-      return 'CAUTIOUS - price is falling. Wait for reversal confirmation before buying. Do NOT sell.';
+      return 'BUY opportunity - weak downtrend, potential entry point. Do NOT sell in downtrend.';
     } else if (trend === 'DOWNTREND') {
-      return 'AVOID SELLING (downtrend - would lock in losses). Wait for recovery before acting.';
+      return 'BUY opportunity - downtrend dip. Good entry if near support. Do NOT sell at a loss.';
     } else {
-      return 'WAIT for clearer trend signal';
+      return 'NEUTRAL - consider small entry or wait for clearer signal';
     }
   }
 

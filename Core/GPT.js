@@ -570,10 +570,12 @@ Choose ONE action and respond with ONLY this JSON array format. No other text.
 EXAMPLES OF VALID RESPONSES:
 [{"action":"sell","quantity":0.3,"price":55.71}]
 [{"action":"buy","quantity":0.5,"price":55.71}]
-[{"action":"wait","seconds":5}]
+[{"action":"wait","seconds":120,"reason":"waiting for support level"}]
 [{"action":"complete"}]
 [{"action":"query"}]
 
+IMPORTANT: Downtrends are BUYING opportunities. If BUY is VIABLE and the market is dipping, prefer buying over waiting.
+If you choose wait, include "seconds" (30-600) for how long before rechecking.
 Pick the best action from viable actions listed above. Return a JSON array with ONE object. Start with [ end with ]. No other text.`;
       } else if (stepName === 'think') {
         systemPrompt = `You are a pure JSON signal API. Respond with ONLY valid JSON object. No explanation. No text. No markdown.

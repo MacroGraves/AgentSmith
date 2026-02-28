@@ -51,6 +51,7 @@ class AutoTrader {
       let currentPrompt = initialPrompt;
       const loopDecisions = [];
       let finalAction = null;
+      let waitSeconds = null;
       let accountDrainDetected = false;
       let excessiveLossDetected = false;
       const lossPrevention = Settings.Trading?.Rules?.LossPrevention || { StrictlyNoLosses: true };
@@ -117,6 +118,10 @@ class AutoTrader {
           // If action is terminal, mark and stop
           if (mergedConfig.terminalActions.includes(actionType)) {
             finalAction = actionType;
+            // Capture GPT's recommended wait duration
+            if (actionType === 'wait' && a.seconds) {
+              waitSeconds = parseInt(a.seconds) || null;
+            }
             break;
           }
 
@@ -231,6 +236,7 @@ class AutoTrader {
         finalAction: finalAction || null,
         decisions: loopDecisions,
         totalTime: duration,
+        waitSeconds,
       };
     } catch (error) {
       console.error(`[AUTOTRADER] Autonomous trading error: ${error.message}`);
@@ -319,12 +325,13 @@ class AutoTrader {
       const usdtBalance = balances.USDT || { free: 0, locked: 0, total: 0 };
       let availableUSDT = usdtBalance.free || 0;
 
-      // Cranks safety: subtract locked USDC and cap at MockBalance
+      // Cranks safety: subtract locked USDC and cap at MockBalance (includes unallocated free capital)
       const cranksLockedUSDC = this.cranks ? this.cranks.getLockedUSDC() : 0;
-      const cranksMockBalance = this.cranks ? this.cranks.getMockBalance() : Infinity;
+      const realFreeUSDT = Math.max(0, availableUSDT - cranksLockedUSDC);
+      const cranksMockBalance = this.cranks ? this.cranks.getMockBalance(realFreeUSDT) : Infinity;
       if (cranksLockedUSDC > 0 || (cranksMockBalance < Infinity && cranksMockBalance > 0)) {
         console.log(`   [Cranks] 🔒 Locked USDC: $${cranksLockedUSDC.toFixed(2)}, MockBalance: $${cranksMockBalance.toFixed(2)} (trading budget)`);
-        availableUSDT = Math.min(Math.max(0, availableUSDT - cranksLockedUSDC), cranksMockBalance);
+        availableUSDT = Math.min(realFreeUSDT, cranksMockBalance);
       }
       
       // ENFORCE position sizing limits from Settings BEFORE any other checks

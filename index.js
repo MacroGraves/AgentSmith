@@ -498,10 +498,11 @@ async function BuildTradingContext(pair = 'LTCUSDT') {
     const baseBalance = balances[baseAsset] || { free: 0, locked: 0 };
     const quoteBalance = balances[quoteAsset] || { free: 0, locked: 0 };
 
-    // Cranks: locked USDC excluded, MockBalance caps trading budget
+    // Cranks: locked USDC excluded, MockBalance caps trading budget (includes unallocated USDT)
     const cranksLockedUSDC = process.cranks ? process.cranks.getLockedUSDC() : 0;
-    const cranksMockBalance = process.cranks ? process.cranks.getMockBalance() : Infinity;
-    const effectiveQuoteFree = Math.min(Math.max(0, quoteBalance.free - cranksLockedUSDC), cranksMockBalance);
+    const realFreeUSDT = Math.max(0, quoteBalance.free - cranksLockedUSDC);
+    const cranksMockBalance = process.cranks ? process.cranks.getMockBalance(realFreeUSDT) : Infinity;
+    const effectiveQuoteFree = Math.min(realFreeUSDT, cranksMockBalance);
 
     // Fetch market analysis for trend context
     let trendContext = '';
@@ -680,21 +681,20 @@ HARD CONSTRAINTS (Non-Negotiable - Enforced at Execution):
 
 2. BUYING:
    - Only recommend BUY if it shows as VIABLE in "Viable Actions" above
-   - Require strong downtrend confirmation before buying
+   - Downtrends and dips ARE buying opportunities — look for entries, don't just wait
    - If insufficient balance ($${minUSDTForBuy}+ USDT needed), recommend WAIT
-   - Never over-leverage: use conservative position sizing
+   - Use conservative position sizing (the system enforces max trade size automatically)
    
 3. SELLING:
    - Only recommend SELL if it shows as VIABLE in "Viable Actions" above
    - Require >= ${minProfitPercent}% profit before selling
-   - Strong uptrend confirmation helps, but profit target is mandatory
-   - If profit < ${minProfitPercent}%, ALWAYS recommend WAIT
+   - Strong uptrend = good exit point. Lock in profits when targets are met
+   - If profit < ${minProfitPercent}%, recommend WAIT
 
 4. GENERAL:
-   - Assume no entry price available - use WAIT if uncertain about profit
    - Follow market signals: UPTREND = sell opportunity, DOWNTREND = buy opportunity
-   - Reduce unnecessary trades to save API costs
-   - When uncertain, always recommend WAIT over risky action
+   - Be decisive: markets move fast, take action when signals are clear
+   - If you recommend WAIT, include a "seconds" field (30-600) for recheck timing
    - Return ONE action: buy, sell, wait, query, or complete`;
 
     logger.log('[Trading] Context Assessment:');
@@ -833,6 +833,7 @@ async function TestGPTProcess() {
       while (iterationNum < iterationCount) {
         iterationNum++;
 
+        let gptWaitSeconds = null;
         try {
           if (isInfiniteLoop) {
             logger.log(`\n[LOOP] Continuous operation - iteration ${iterationNum}`);
@@ -850,7 +851,7 @@ async function TestGPTProcess() {
           const selectedPair = await pairSelector.SelectBestPair();
           logger.log(`[LOOP] Selected pair: ${selectedPair}`);
         
-          let strategy = `Execute your trading strategy for ${selectedPair} with strict loss prevention: NEVER sell at a loss or breakeven. Only SELL if profit >= 2%. ONLY BUY in strong downtrends with confirmation. REDUCE GPT calls: Only act on clear viable signals. Prioritize: (1) Capital Preservation, (2) Conservative profits, (3) Wait for better opportunities.`;
+          let strategy = `Execute your trading strategy for ${selectedPair} with strict loss prevention: NEVER sell at a loss or breakeven. Only SELL if profit >= 2%. Actively look for entry points during dips and downtrends — these are buying opportunities. Be decisive: when the market gives a signal, act on it. Prioritize: (1) Capital Preservation, (2) Taking profitable entries on dips, (3) Selling at good profit targets. If you choose WAIT, include a "seconds" parameter (30-600) indicating how long before the market should be rechecked.`;
         
           const tradingResult = await StartTrading(
             strategy,
@@ -864,6 +865,7 @@ async function TestGPTProcess() {
         
           // Record the action taken on this pair
           const actionTaken = tradingResult?.action || 'wait';
+          gptWaitSeconds = tradingResult?.waitSeconds || null;
           await pairSelector.RecordAction(actionTaken);
 
           if (['buy', 'sell'].includes(actionTaken)) totalTrades++;
@@ -881,11 +883,22 @@ async function TestGPTProcess() {
           logger.log(`[LOOP] Continuing despite error (${consecutiveErrors}/${maxConsecutiveErrors} consecutive failures)`);
         }
         
-        // Delay between loop iterations to reduce GPT calls
+        // Delay between loop iterations — use GPT's recommended wait or default
         if (iterationNum < iterationCount) {
-          const waitMs = cliConfig.fast ? 5000 : 150000; // 5 seconds (--fast) or 5 minutes (default)
-          const waitLabel = cliConfig.fast ? '5 seconds' : '2.5 minutes';
-          logger.log(`[LOOP] Waiting ${waitLabel} before next iteration...`);
+          const defaultWaitMs = 150000; // 2.5 minutes default
+          const minWaitMs = 30000;      // 30 seconds minimum
+          const maxWaitMs = 600000;     // 10 minutes maximum
+          let waitMs;
+          if (cliConfig.fast) {
+            waitMs = 5000;
+          } else if (gptWaitSeconds) {
+            waitMs = Math.min(Math.max(gptWaitSeconds * 1000, minWaitMs), maxWaitMs);
+          } else {
+            waitMs = defaultWaitMs;
+          }
+          const waitLabel = waitMs >= 60000 ? `${(waitMs / 60000).toFixed(1)} minutes` : `${(waitMs / 1000).toFixed(0)} seconds`;
+          const source = gptWaitSeconds ? '(GPT recommended)' : '(default)';
+          logger.log(`[LOOP] Waiting ${waitLabel} ${source} before next iteration...`);
           await new Promise(r => setTimeout(r, waitMs));
         }
       }

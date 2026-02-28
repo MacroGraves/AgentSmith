@@ -316,21 +316,27 @@ class Cranks {
   }
 
   /**
-   * Get the MockBalance — sum of R0 across all coins.
+   * Get the MockBalance — sum of R0 across all coins PLUS unallocated free capital.
    * This is the maximum USDT the bot is allowed to trade with.
    * Safety ratchets (R1, R2) are NOT included — they are protected capital.
    * Example: cranks [30, 30, 0, 0] → MockBalance = 30 (not 60).
    * If no coins are tracked yet (fresh start), returns Infinity so it doesn't cap the balance.
+   * @param {number|null} freeQuoteBalance - Current free USDT balance (if provided, includes unallocated capital)
    * @returns {number} - Dollar amount available for trading, or Infinity if no cranks exist yet
    */
-  getMockBalance() {
+  getMockBalance(freeQuoteBalance = null) {
     const coinKeys = Object.values(this.coins);
     if (coinKeys.length === 0) return Infinity; // No cranks yet — don't restrict trading
-    let total = 0;
+    let totalR0 = 0;
     for (const coin of coinKeys) {
-      total += Math.max(0, coin.values[0]);
+      totalR0 += Math.max(0, coin.values[0]);
     }
-    return total;
+    // Include unallocated capital — free USDT not assigned to any crank position
+    // This allows the bot to open new positions with deposited capital that hasn't been traded yet
+    if (freeQuoteBalance !== null && freeQuoteBalance > totalR0) {
+      return freeQuoteBalance; // More free cash than tracked R0 = unallocated capital available
+    }
+    return totalR0;
   }
 
   /**
