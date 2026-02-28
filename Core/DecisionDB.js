@@ -8,7 +8,7 @@ const Utils = require('./Utils.js');
 class DecisionDB {
   constructor() {
     this.connection = null;
-    this.tableName = 'gpt_decisions';
+    this.tableName = 'Decisions';
   }
 
   /** Auto-reconnecting query wrapper */
@@ -78,7 +78,7 @@ class DecisionDB {
   async _CreateAutoLoopsTable() {
     try {
       const sql = `
-        CREATE TABLE IF NOT EXISTS gpt_auto_loops (
+        CREATE TABLE IF NOT EXISTS Loops (
           id VARCHAR(255) PRIMARY KEY,
           initial_prompt LONGTEXT NOT NULL,
           status VARCHAR(32) DEFAULT 'running',
@@ -285,7 +285,7 @@ class DecisionDB {
       const { initialPrompt, status = 'running', decisionCount = 0, endTime = null, finalOutcome = null, config = {} } = loopData;
 
       const sql = `
-        INSERT INTO gpt_auto_loops (id, initial_prompt, status, decision_count, start_time, end_time, final_outcome, config)
+        INSERT INTO Loops (id, initial_prompt, status, decision_count, start_time, end_time, final_outcome, config)
         VALUES (?, ?, ?, ?, NOW(), ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           status = VALUES(status),
@@ -319,7 +319,7 @@ class DecisionDB {
    */
   async GetAutoLoop(loopId) {
     try {
-      const sql = `SELECT * FROM gpt_auto_loops WHERE id = ?`;
+      const sql = `SELECT * FROM Loops WHERE id = ?`;
       const results = await this._query(sql, [loopId]);
 
       if (results.length === 0) {
@@ -353,7 +353,7 @@ class DecisionDB {
   async GetAutoLoopsByStatus(status, limit = 50) {
     try {
       const sql = `
-        SELECT * FROM gpt_auto_loops
+        SELECT * FROM Loops
         WHERE status = ?
         ORDER BY start_time DESC
         LIMIT ?

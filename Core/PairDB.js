@@ -8,7 +8,7 @@ const Utils = require('./Utils.js');
 class PairDB {
   constructor() {
     this.connection = null;
-    this.tableName = 'trading_pairs';
+    this.tableName = 'Pairs';
   }
 
   /** Auto-reconnecting query wrapper */

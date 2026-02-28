@@ -567,15 +567,28 @@ ${context}
 
 Choose ONE action and respond with ONLY this JSON array format. No other text.
 
-EXAMPLES OF VALID RESPONSES:
-[{"action":"sell","quantity":0.3,"price":55.71}]
-[{"action":"buy","quantity":0.5,"price":55.71}]
-[{"action":"wait","seconds":120,"reason":"waiting for support level"}]
-[{"action":"complete"}]
-[{"action":"query"}]
+IMPORTANT — READ THE CONTEXT ABOVE CAREFULLY:
+- Check "Viable Actions" to see what actions are POSSIBLE (balance, holdings, etc.)
+- Check "Open Position" if present — it shows entry price, P/L, and whether selling is allowed
+- If BUY shows "NOT VIABLE" or "NOT POSSIBLE", you MUST choose "wait" — do NOT suggest buy
+- If SELL shows "NOT VIABLE", there's nothing to sell — choose "wait" or "buy"
+- SELL is only allowed when profit >= the minimum shown in Open Position (system will reject otherwise)
 
-IMPORTANT: Downtrends are BUYING opportunities. If BUY is VIABLE and the market is dipping, prefer buying over waiting.
-If you choose wait, include "seconds" (30-600) for how long before rechecking.
+EXAMPLES OF VALID RESPONSES:
+[{"action":"buy","percent":15,"reason":"4% dip with $55 budget, good entry"}]
+[{"action":"buy","percent":20,"reason":"5%+ crash, strong entry at max"}]
+[{"action":"sell","quantity":0.3,"reason":"profit target met at 5.2%"}]
+[{"action":"wait","seconds":120,"reason":"profit only 1.3%, need 4%+"}]
+[{"action":"wait","seconds":60,"reason":"insufficient balance for buy"}]
+[{"action":"complete"}]
+
+RULES:
+- For BUY: include "percent" (5-20) = what % of your budget to spend. HARD MAX is 20% (1/5th of balance). Never exceed 20.
+- For SELL: only if Open Position shows profit target met. Include "quantity" (how much to sell).
+- For WAIT: include "seconds" (30-600) for recheck timing.
+- Downtrends ARE buying opportunities. If BUY is VIABLE and the market is dipping, BUY — don't wait.
+- A 3-5% daily dip is a STRONG buy signal. Use 15-20%. Smaller dips use 5-10%.
+- NEVER suggest an action that the context says is NOT VIABLE or NOT POSSIBLE.
 Pick the best action from viable actions listed above. Return a JSON array with ONE object. Start with [ end with ]. No other text.`;
       } else if (stepName === 'think') {
         systemPrompt = `You are a pure JSON signal API. Respond with ONLY valid JSON object. No explanation. No text. No markdown.
@@ -585,6 +598,13 @@ Start with { and end with }. Nothing before { and nothing after }.`;
 
 Context:
 ${context}
+
+DECISION GUIDE:
+- If BUY is VIABLE and price is dipping (negative 24h change), action_type should be "buy"
+- A dip of 2%+ with BUY VIABLE = strong buy signal → action_type: "buy", confidence: 0.8+
+- A dip of 5%+ = very strong buy signal → action_type: "buy", confidence: 0.95
+- Only use "wait" if no viable actions or market is truly flat/unclear
+- Downtrends ARE buying opportunities, not reasons to wait
 
 Respond with ONLY this JSON format. No other text:
 {
@@ -601,6 +621,12 @@ Start with { and end with }. Nothing before { and nothing after }.`;
 
 Context:
 ${context}
+
+VALIDATION RULES:
+- If BUY is listed as VIABLE and market is dipping, feasible should be true with risk_level "low" or "medium"
+- Dips are NORMAL and EXPECTED — a 3-5% dip is NOT "high" risk, it's an opportunity
+- Only flag blocking_issues for REAL problems: insufficient balance, exchange errors, sell-at-loss violations
+- Do NOT block buys just because the market is down — that's when we WANT to buy
 
 Respond with ONLY this JSON format. No other text:
 {
@@ -635,8 +661,10 @@ Respond with ONLY this JSON format. No other text:
       const response = await this._sendRequest(messages);
       const content = response.choices[0].message.content.trim();
 
-      // DEBUG: Logging disabled - system is working correctly
-      // if (gptLogging) { ... }
+      // Log full GPT decision chain when enabled
+      if (gptLogging) {
+        console.log(`[DEBUG_${stepName.toUpperCase()}_RAW] ${content.substring(0, 500)}`);
+      }
 
       // Map step names to expected output keys
       const stepKeyMap = {

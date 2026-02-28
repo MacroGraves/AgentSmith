@@ -175,6 +175,13 @@ class BinanceExchange {
         throw new Error(`Binance API Error: ${message}`);
       }
     }
+
+    // If we exhausted retries, throw the last error with Binance metadata attached
+    const finalMsg = lastError?.response?.data?.msg || lastError?.message || 'Unknown error';
+    const err = new Error(`Binance API Error: ${finalMsg}`);
+    err.binanceCode = lastError?.response?.data?.code || null;
+    err.response = lastError?.response || null;
+    throw err;
   }
 
   /**
@@ -692,11 +699,24 @@ class BinanceExchange {
       // Always refresh exchange info for the specific pair we're about to trade
       console.log(`[Binance] Fetching/updating exchange info for ${orderSymbol}...`);
       await this.GetExchangeInfo(orderSymbol);
+
+      // For MARKET orders, price is null — fetch current price so NOTIONAL validation works
+      let validationPrice = price;
+      if (!validationPrice || validationPrice <= 0) {
+        validationPrice = await this.GetPrice(orderSymbol);
+        console.log(`[Binance] MARKET order — fetched current price $${validationPrice} for validation`);
+      }
       
-      // Validate quantity against LOT_SIZE and NOTIONAL filters (pass price for NOTIONAL check)
-      const validation = this.ValidateQuantity(quantity, price);
+      // Validate quantity against LOT_SIZE and NOTIONAL filters
+      const validation = this.ValidateQuantity(quantity, validationPrice);
       if (!validation.isValid) {
-        throw new Error(`Order quantity validation failed: ${validation.message}`);
+        // Determine error type from the validation message for structured error handling
+        const msg = validation.message || '';
+        let errorCode = 'VALIDATION_FAILED';
+        if (msg.includes('NOTIONAL') || msg.includes('below NOTIONAL')) errorCode = 'NOTIONAL';
+        else if (msg.includes('LOT_SIZE')) errorCode = 'LOT_SIZE';
+        console.error(`[Binance] Pre-flight validation failed (${errorCode}): ${msg}`);
+        return { success: false, error: `Order validation failed: ${msg}`, errorCode };
       }
       
       // Use corrected quantity if validation auto-fixed it (stepSize alignment)
@@ -717,6 +737,7 @@ class BinanceExchange {
       console.log(`   Side: ${orderParams.side}`);
       console.log(`   Type: ${orderParams.type}`);
       console.log(`   Quantity: ${formattedQuantity} (original: ${quantity})`);
+      console.log(`   Est. Value: $${(parseFloat(formattedQuantity) * validationPrice).toFixed(2)}`);
       console.log(`[Binance] Sending order to API...`);
 
       const response = await this._request('POST', '/v3/order', orderParams, true);
@@ -740,11 +761,30 @@ class BinanceExchange {
 
       return { success: true, order };
     } catch (error) {
-      console.error(`Failed to place ${side} order:`, error.message);
+      const errorMsg = error.response?.data?.msg || error.message;
+      const binanceCode = error.binanceCode || error.response?.data?.code || null;
+      console.error(`Failed to place ${side} order:`, errorMsg);
       if (error.response?.data) {
         console.error(`[Binance API Error Details]:`, JSON.stringify(error.response.data));
       }
-      return { success: false, error: error.message };
+
+      // Classify known Binance error codes into structured errorCode for upstream handling
+      let errorCode = 'UNKNOWN';
+      const msgUpper = (errorMsg || '').toUpperCase();
+      if (msgUpper.includes('NOTIONAL'))             errorCode = 'NOTIONAL';
+      else if (msgUpper.includes('LOT_SIZE'))         errorCode = 'LOT_SIZE';
+      else if (msgUpper.includes('INSUFFICIENT'))     errorCode = 'INSUFFICIENT_BALANCE';
+      else if (msgUpper.includes('MIN_NOTIONAL'))     errorCode = 'NOTIONAL';
+      else if (msgUpper.includes('PERCENT_PRICE'))    errorCode = 'PERCENT_PRICE';
+      else if (msgUpper.includes('MARKET_LOT_SIZE'))  errorCode = 'MARKET_LOT_SIZE';
+      else if (msgUpper.includes('MAX_NUM_ORDERS'))   errorCode = 'MAX_ORDERS';
+      else if (msgUpper.includes('PRICE_FILTER'))     errorCode = 'PRICE_FILTER';
+      else if (binanceCode === -2010)                 errorCode = 'INSUFFICIENT_BALANCE';
+      else if (binanceCode === -1013)                 errorCode = 'LOT_SIZE';
+      else if (binanceCode === -1021)                 errorCode = 'TIMESTAMP';
+      else if (binanceCode === -1015)                 errorCode = 'RATE_LIMIT';
+
+      return { success: false, error: errorMsg, errorCode, binanceCode };
     }
   }
 

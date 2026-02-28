@@ -1,4 +1,4 @@
-const Config = require('../Settings.json');
+const Config = require('../MySQL.json');
 const axios = require('axios');
 const BigNumber = require('bignumber.js');
 
@@ -35,17 +35,18 @@ async function Connection(MySQL, connection) {
   // If is windows create a connection where the host is localhost otherwise have the socket path set instead
   if (isWindows) {
     connection = await MySQL.createConnection({
-      host: Config.mysql.host,
-      user: Config.mysql.user,
-      password: Config.mysql.password,
-      database: Config.mysql.database,
+      host: Config.host,
+      port: Config.port || 3306,
+      user: Config.user,
+      password: Config.password,
+      database: Config.database,
     });
   } else {
     connection = await MySQL.createConnection({
-      socketPath: Config.mysql.socketPath,
-      user: Config.mysql.user,
-      password: Config.mysql.password,
-      database: Config.mysql.database,
+      socketPath: Config.socketPath,
+      user: Config.user,
+      password: Config.password,
+      database: Config.database,
     });
   }
   return connection;

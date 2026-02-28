@@ -1,6 +1,6 @@
 const MySQL = require('promise-mysql');
 const Utils = require('./Utils.js');
-const Settings = require('../Settings.json');
+const Settings = require('./Settings.js');
 
 /**
  * Cranks Safety System — Annihilation Prevention
@@ -27,7 +27,7 @@ class Cranks {
   constructor(binanceExchange) {
     this.binance = binanceExchange;
     this.connection = null;
-    this.tableName = 'trading_cranks';
+    this.tableName = 'Cranks';
     this.coins = {};
     this.totalLockedUSDC = 0;
   }
@@ -47,7 +47,7 @@ class Cranks {
       await this._createTable();
       await this._loadFromDB();
       const mockBal = this.getMockBalance();
-      const mockBalStr = mockBal === Infinity ? 'unlimited (no cranks yet)' : `$${mockBal.toFixed(2)}`;
+      const mockBalStr = mockBal === Infinity ? 'unlimited (no cascades yet)' : `$${mockBal.toFixed(2)}`;
       console.log(`[Cranks] Initialized — ${Object.keys(this.coins).length} coins tracked, MockBalance: ${mockBalStr}, $${this.totalLockedUSDC.toFixed(2)} USDC locked`);
       return true;
     } catch (error) {
@@ -316,26 +316,32 @@ class Cranks {
   }
 
   /**
-   * Get the MockBalance — sum of R0 across all coins PLUS unallocated free capital.
-   * This is the maximum USDT the bot is allowed to trade with.
-   * Safety ratchets (R1, R2) are NOT included — they are protected capital.
-   * Example: cranks [30, 30, 0, 0] → MockBalance = 30 (not 60).
-   * If no coins are tracked yet (fresh start), returns Infinity so it doesn't cap the balance.
-   * @param {number|null} freeQuoteBalance - Current free USDT balance (if provided, includes unallocated capital)
-   * @returns {number} - Dollar amount available for trading, or Infinity if no cranks exist yet
+   * Get the MockBalance — the maximum USDT the bot is allowed to trade with.
+   * Returns Infinity (unrestricted) until the first crank is "turned" (a cascade event).
+   * A cascade = profit overflowing from R0 into R1+. Once that happens, MockBalance = sum of R0.
+   * Safety ratchets (R1, R2, R3) are protected capital and NOT included.
+   * Example: cranks [30, 0, 0, 0] → no cascade yet → Infinity (100% available)
+   *          cranks [30, 30, 0, 0] → cascade happened → MockBalance = 30 (R0 only)
+   * @returns {number} - Dollar amount available for trading, or Infinity if no cranks have cascaded
    */
-  getMockBalance(freeQuoteBalance = null) {
-    const coinKeys = Object.values(this.coins);
-    if (coinKeys.length === 0) return Infinity; // No cranks yet — don't restrict trading
+  getMockBalance() {
+    const coins = Object.values(this.coins);
+    if (coins.length === 0) return Infinity; // No cranks yet — don't restrict trading
+
+    // Check if ANY crank has been "turned" (any R1, R2, or R3 > 0 means a cascade happened)
+    let anyCascade = false;
     let totalR0 = 0;
-    for (const coin of coinKeys) {
+    for (const coin of coins) {
       totalR0 += Math.max(0, coin.values[0]);
+      if (coin.values[1] > 0 || coin.values[2] > 0 || coin.values[3] > 0 || (coin.lockedUSDC || 0) > 0) {
+        anyCascade = true;
+      }
     }
-    // Include unallocated capital — free USDT not assigned to any crank position
-    // This allows the bot to open new positions with deposited capital that hasn't been traded yet
-    if (freeQuoteBalance !== null && freeQuoteBalance > totalR0) {
-      return freeQuoteBalance; // More free cash than tracked R0 = unallocated capital available
-    }
+
+    // No cranks turned yet → trade with full balance (100%)
+    if (!anyCascade) return Infinity;
+
+    // Cranks have been turned → MockBalance = sum of R0 (protected capital excluded)
     return totalR0;
   }
 
@@ -355,10 +361,8 @@ class Cranks {
   getSummary() {
     if (Object.keys(this.coins).length === 0) return '';
 
-    const mockBal = this.getMockBalance();
     let summary = `\nCranks Safety System (Annihilation Prevention):\n`;
     summary += `- Total USDC Permanently Locked: $${this.totalLockedUSDC.toFixed(2)} (converted, never touched again)\n`;
-    summary += `- MockBalance (trading budget): $${mockBal.toFixed(2)} — this is the max you can trade with\n`;
 
     for (const [coin, data] of Object.entries(this.coins)) {
       const total = data.values[0] + data.values[1] + data.values[2] + data.values[3];

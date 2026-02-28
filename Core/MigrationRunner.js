@@ -6,15 +6,15 @@ const fs = require('fs');
 const path = require('path');
 const MySQL = require('promise-mysql');
 
-const Settings = require('../Settings.json');
+const Settings = require('../MySQL.json');
 
 async function RunMigrations() {
   const connection = await MySQL.createConnection({
-    host: Settings.mysql.host,
-    user: Settings.mysql.user,
-    password: Settings.mysql.password,
-    database: Settings.mysql.database,
-    port: Settings.mysql.port || 3306,
+    host: Settings.host,
+    user: Settings.user,
+    password: Settings.password,
+    database: Settings.database,
+    port: Settings.port || 3306,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,

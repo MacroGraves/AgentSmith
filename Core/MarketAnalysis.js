@@ -123,12 +123,18 @@ class MarketAnalysis {
     const ma7 = closes.slice(-7).reduce((a, b) => a + b, 0) / Math.min(7, closes.length);
     const ma24 = closes.reduce((a, b) => a + b, 0) / closes.length;
 
-    // Determine trend direction
+    // Determine trend direction using MAs + 24h change for fast-moving markets
+    const pctChange = parseFloat(percentChange) || 0;
     let trend = 'NEUTRAL';
     if (currentPrice > ma24 && currentPrice > ma7) {
       trend = 'UPTREND';
     } else if (currentPrice < ma24 && currentPrice < ma7) {
       trend = 'DOWNTREND';
+    } else if (pctChange <= -2) {
+      // 2%+ daily drop is a downtrend even if MAs haven't caught up yet
+      trend = 'DOWNTREND';
+    } else if (pctChange >= 2) {
+      trend = 'UPTREND';
     }
 
     // Volatility (standard deviation)
@@ -182,13 +188,15 @@ class MarketAnalysis {
     } else if (trend === 'UPTREND') {
       return 'HOLD or SELL if profit target met (uptrend, consider taking profits)';
     } else if (trend === 'DOWNTREND' && pctChange < -5) {
-      return 'BUY opportunity - steep decline may be near bottom. Use small position size. Do NOT sell at a loss.';
-    } else if (trend === 'DOWNTREND' && strength.includes('WEAK')) {
-      return 'BUY opportunity - weak downtrend, potential entry point. Do NOT sell in downtrend.';
+      return 'STRONG BUY opportunity - steep decline, excellent entry point. Use max position (20%).';
+    } else if (trend === 'DOWNTREND' && pctChange < -3) {
+      return 'BUY opportunity - significant dip, good entry point. Use 15-20% position.';
     } else if (trend === 'DOWNTREND') {
-      return 'BUY opportunity - downtrend dip. Good entry if near support. Do NOT sell at a loss.';
+      return 'BUY opportunity - downtrend dip. Good entry if near support. Use 10-15% position.';
+    } else if (pctChange <= -2) {
+      return 'BUY opportunity - price dipping, consider entry with 10-15% position.';
     } else {
-      return 'NEUTRAL - consider small entry or wait for clearer signal';
+      return 'NEUTRAL - small entry opportunity, consider 5-10% position.';
     }
   }
 

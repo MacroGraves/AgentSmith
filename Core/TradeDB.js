@@ -8,7 +8,7 @@ const Utils = require('./Utils.js');
 class TradeDB {
   constructor() {
     this.connection = null;
-    this.tableName = 'trading_history';
+    this.tableName = 'History';
   }
 
   /** Auto-reconnecting query wrapper */

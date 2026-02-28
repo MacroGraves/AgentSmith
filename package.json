@@ -12,6 +12,7 @@
   "dependencies": {
     "axios": "^1.13.5",
     "bignumber.js": "^10.0.2",
+    "discord.js": "^14.25.1",
     "promise-mysql": "^5.2.0"
   }
 }

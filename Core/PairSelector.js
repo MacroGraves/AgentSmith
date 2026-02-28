@@ -14,6 +14,8 @@ class PairSelector {
       'AVAXUSDT', 'UNIUSDT', 'LINKUSDT', 'MATICUSDT'
     ];
     this.lastSelectedPair = null;
+    this.recentBuys = new Map(); // pair → timestamp of last buy (cooldown tracking)
+    this.buyCooldownMs = 15 * 60 * 1000; // 15 minute cooldown after buying a pair
   }
 
   /**
@@ -113,12 +115,27 @@ class PairSelector {
       // Sort by score descending
       pairScores.sort((a, b) => b.score - a.score);
 
+      // Filter out pairs on buy cooldown (recently bought)
+      const now = Date.now();
+      const availablePairs = pairScores.filter(p => {
+        const lastBuy = this.recentBuys.get(p.pair);
+        if (lastBuy && (now - lastBuy) < this.buyCooldownMs) {
+          const remainMin = ((this.buyCooldownMs - (now - lastBuy)) / 60000).toFixed(1);
+          console.log(`[PAIR] ${p.pair} on buy cooldown (${remainMin}m remaining) — skipping`, { logType: 'pairs' });
+          return false;
+        }
+        return true;
+      });
+
+      // If ALL pairs are on cooldown, use the full list (don't deadlock)
+      const selectionPool = availablePairs.length > 0 ? availablePairs : pairScores;
+
       // Log ranking
       console.log(`[PAIR] Ranking: ${pairScores.map((p, i) => `${i+1}. ${p.pair}=${p.score.toFixed(1)}`).join(', ')}`, { logType: 'pairs' });
 
       // Pick from top tier using weighted random selection
       // This ensures diversity while favoring higher scores
-      const selected = this._weightedSelect(pairScores);
+      const selected = this._weightedSelect(selectionPool);
 
       this.lastSelectedPair = selected.pair;
       console.log(`[PAIR] Selected: ${selected.pair} (score: ${selected.score.toFixed(1)}/100)`, { logType: 'pairs' });
@@ -266,6 +283,12 @@ class PairSelector {
     if (!this.lastSelectedPair) return false;
     
     try {
+      // Track buy cooldowns to prevent repeated buys on the same pair
+      if (action === 'buy') {
+        this.recentBuys.set(this.lastSelectedPair, Date.now());
+        console.log(`[PAIR] ${this.lastSelectedPair} entered buy cooldown (${(this.buyCooldownMs / 60000).toFixed(0)}min)`, { logType: 'pairs' });
+      }
+
       console.log(`[PAIR] Recording action '${action}' for ${this.lastSelectedPair}`, { logType: 'pairs' });
       return await this.pairDB.RecordAction(this.lastSelectedPair, action);
     } catch (error) {

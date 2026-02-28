@@ -149,3 +149,6 @@ package-lock.json
 
 # Settings json
 Settings.json
+
+# Discord
+Discord/Config.json

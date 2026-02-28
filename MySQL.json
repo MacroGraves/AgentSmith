@@ -1,0 +1,8 @@
+{
+  "host": "localhost",
+  "port": 3306,
+  "database": "agentsmith",
+  "user": "agentsmith",
+  "password": "Tiger4$Mountain9@Storm1#River5!Wind5#Dragon1",
+  "socketPath": "/var/run/mysqld/mysqld.sock"
+}

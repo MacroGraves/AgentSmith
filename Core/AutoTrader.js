@@ -4,7 +4,7 @@
  * Bridges GPT decision-making with actual trading execution via Binance API
  */
 
-const Settings = require('../Settings.json');
+const Settings = require('./Settings.js');
 const TradeDB = require('./TradeDB.js');
 
 class AutoTrader {
@@ -141,6 +141,13 @@ class AutoTrader {
                 console.error('[FAILSAFE] 🛑 Account modified externally! Stopping all trading immediately.');
                 accountDrainDetected = true;
                 finalAction = 'stop';
+                break;
+              }
+
+              // If buy was rejected due to insufficient balance, stop retrying
+              if (execResult && execResult.insufficientBalance) {
+                console.log(`[AUTOTRADER] Insufficient balance for buy — ending loop.`);
+                finalAction = 'wait';
                 break;
               }
 
@@ -306,15 +313,16 @@ class AutoTrader {
     try {
       const { quantity, price, symbol } = params;
 
-      if (!quantity) {
-        throw new Error('Buy action requires quantity parameter');
+      // quantity is optional when percent is provided — we compute it from percent below
+      if (!quantity && !params.percent) {
+        throw new Error('Buy action requires either quantity or percent parameter');
       }
 
       // Check Settings constraints for BUY
       const tradingRules = Settings.Trading?.Rules || {};
       const balanceReqs = tradingRules.BalanceRequirements || { MinUSDTForBuy: 15, MinAssetValueForSell: 15 };
       const currentPrice = price || (await this.binance.GetPrice(symbol));
-      let requiredUSDT = quantity * currentPrice;
+      let requiredUSDT = quantity ? quantity * currentPrice : 0;
       const minUSDTForBuy = balanceReqs.MinUSDTForBuy || 15;
 
       // Derive baseAsset from symbol for logging
@@ -325,35 +333,59 @@ class AutoTrader {
       const usdtBalance = balances.USDT || { free: 0, locked: 0, total: 0 };
       let availableUSDT = usdtBalance.free || 0;
 
-      // Cranks safety: subtract locked USDC and cap at MockBalance (includes unallocated free capital)
+      // Early bail: if balance already below minimum, don't waste API calls
+      if (availableUSDT < minUSDTForBuy) {
+        console.log(`   [Balance Check] Balance $${availableUSDT.toFixed(2)} is below minimum trade size $${minUSDTForBuy}. Skipping buy.`);
+        return { success: false, action: 'buy', error: 'Low balance', insufficientBalance: true };
+      }
+
+      // Cranks safety: subtract locked USDC, cap at MockBalance after first cascade
       const cranksLockedUSDC = this.cranks ? this.cranks.getLockedUSDC() : 0;
       const realFreeUSDT = Math.max(0, availableUSDT - cranksLockedUSDC);
-      const cranksMockBalance = this.cranks ? this.cranks.getMockBalance(realFreeUSDT) : Infinity;
-      if (cranksLockedUSDC > 0 || (cranksMockBalance < Infinity && cranksMockBalance > 0)) {
-        console.log(`   [Cranks] 🔒 Locked USDC: $${cranksLockedUSDC.toFixed(2)}, MockBalance: $${cranksMockBalance.toFixed(2)} (trading budget)`);
+      const cranksMockBalance = this.cranks ? this.cranks.getMockBalance() : Infinity;
+      if (cranksLockedUSDC > 0 || cranksMockBalance < Infinity) {
+        const mockStr = cranksMockBalance === Infinity ? 'unlimited (no cascades yet)' : `$${cranksMockBalance.toFixed(2)}`;
+        console.log(`   [Cranks] 🔒 Locked USDC: $${cranksLockedUSDC.toFixed(2)}, MockBalance: ${mockStr}`);
         availableUSDT = Math.min(realFreeUSDT, cranksMockBalance);
       }
       
-      // ENFORCE position sizing limits from Settings BEFORE any other checks
-      const positionSizing = Settings.Trading?.Rules?.PositionSizing || { BuyPercentOfBalance: 0.3, MaxSingleTradePercent: 0.3 };
-      const buyPercent = positionSizing.BuyPercentOfBalance || 0.3;
-      const maxTradePercent = positionSizing.MaxSingleTradePercent || 0.3;
-      const maxBuyUSDT = availableUSDT * Math.min(buyPercent, maxTradePercent);
+      // GPT-CONTROLLED position sizing: GPT sends "percent" (5-20) in its buy action
+      // HARD CAP: 20% (1/5th) of balance — NEVER more, regardless of what GPT asks
+      const hardMaxPercent = 0.20; // Absolute safety cap: 20% of budget (1/5th)
+      const hardMinPercent = 0.05; // Minimum: 5% of budget
+      const defaultPercent = 0.15; // Default if GPT doesn't specify
+      let gptPercent = params.percent ? parseFloat(params.percent) / 100 : null;
       
-      console.log(`   [Balance Status] Requested: ${quantity} ${buyBaseAsset} (cost: $${requiredUSDT.toFixed(2)}), Available: $${availableUSDT.toFixed(2)}, Position limit: $${maxBuyUSDT.toFixed(2)} (${(Math.min(buyPercent, maxTradePercent) * 100).toFixed(0)}%)`);
+      let effectivePercent;
+      if (gptPercent !== null && !isNaN(gptPercent)) {
+        // GPT chose a percentage — clamp to safe range (max 20%)
+        effectivePercent = Math.max(hardMinPercent, Math.min(hardMaxPercent, gptPercent));
+        if (gptPercent > hardMaxPercent) {
+          console.log(`   [GPT Sizing] GPT requested ${(gptPercent * 100).toFixed(0)}% → CAPPED to ${(effectivePercent * 100).toFixed(0)}% (hard max 20%)`);
+        } else {
+          console.log(`   [GPT Sizing] GPT requested ${(gptPercent * 100).toFixed(0)}% → using ${(effectivePercent * 100).toFixed(0)}%`);
+        }
+      } else {
+        effectivePercent = defaultPercent;
+        console.log(`   [GPT Sizing] No percent from GPT, defaulting to ${(effectivePercent * 100).toFixed(0)}%`);
+      }
       
-      // Cap requiredUSDT/quantity to position sizing limit
-      if (requiredUSDT > maxBuyUSDT && maxBuyUSDT > 0) {
-        console.log(`   [Position Sizing] Capping buy from $${requiredUSDT.toFixed(2)} to $${maxBuyUSDT.toFixed(2)} (${(Math.min(buyPercent, maxTradePercent) * 100).toFixed(0)}% of $${availableUSDT.toFixed(2)})`);
-        const cappedQuantity = Math.floor((maxBuyUSDT * 0.99) / currentPrice * 10000000) / 10000000;
-        if (cappedQuantity <= 0) {
-          const error = `Position sizing cap ($${maxBuyUSDT.toFixed(2)}) too small to buy any ${buyBaseAsset} at $${currentPrice}. Action blocked.`;
-          console.warn(`   [Position Sizing] ${error}`);
+      const maxBuyUSDT = availableUSDT * effectivePercent;
+      
+      console.log(`   [Balance Status] Requested: ${quantity} ${buyBaseAsset} (cost: $${requiredUSDT.toFixed(2)}), Available: $${availableUSDT.toFixed(2)}, GPT position: $${maxBuyUSDT.toFixed(2)} (${(effectivePercent * 100).toFixed(0)}%)`);
+      
+      // Compute quantity from GPT's chosen percentage (override GPT's quantity — percent is the source of truth)
+      {
+        const targetUSDT = Math.min(maxBuyUSDT, availableUSDT);
+        const computedQuantity = Math.floor((targetUSDT * 0.99) / currentPrice * 10000000) / 10000000;
+        if (computedQuantity <= 0) {
+          const error = `GPT sizing ($${maxBuyUSDT.toFixed(2)} = ${(effectivePercent * 100).toFixed(0)}% of $${availableUSDT.toFixed(2)}) too small to buy any ${buyBaseAsset} at $${currentPrice}. Action blocked.`;
+          console.warn(`   [GPT Sizing] ${error}`);
           return { success: false, action: 'buy', error };
         }
-        params.quantity = cappedQuantity;
-        requiredUSDT = cappedQuantity * currentPrice;
-        console.log(`   [Position Sizing] Adjusted quantity to ${cappedQuantity} ${buyBaseAsset} (cost: $${requiredUSDT.toFixed(2)})`);
+        console.log(`   [GPT Sizing] Computed quantity: ${computedQuantity} ${buyBaseAsset} ($${(computedQuantity * currentPrice).toFixed(2)}) from ${(effectivePercent * 100).toFixed(0)}% of $${availableUSDT.toFixed(2)}`);
+        params.quantity = computedQuantity;
+        requiredUSDT = computedQuantity * currentPrice;
       }
       
       // CRITICAL CHECK: Did balance change drastically between context and execution?
@@ -384,17 +416,20 @@ class AutoTrader {
         params.quantity = adjustedQuantity;
       }
 
-      // ENFORCE MinTrade requirement - but ONLY if you can afford it
+      // ENFORCE MinTrade requirement — bump UP to minimum if GPT chose too low a percent
       if (requiredUSDT < minUSDTForBuy) {
-        // Check: Do you have enough balance to meet the minimum?
         if (availableUSDT >= minUSDTForBuy) {
-          // YES - you CAN afford the minimum, so ENFORCE it
-          const error = `Buy order value ($${requiredUSDT.toFixed(2)}) is below minimum requirement ($${minUSDTForBuy}). Account balance ($${availableUSDT.toFixed(2)}) can support the minimum, so order is REJECTED to enforce minimum trade value.`;
-          console.warn(`   [MinTrade Enforced] ${error}`);
-          return { success: false, action: 'buy', error };
+          // Bump up to minimum trade size + 5% margin to safely clear Binance NOTIONAL filter
+          const bumpTarget = minUSDTForBuy * 1.05;
+          const bumpQuantity = Math.floor((bumpTarget) / currentPrice * 10000000) / 10000000;
+          console.log(`   [MinTrade Bump] GPT amount $${requiredUSDT.toFixed(2)} below $${minUSDTForBuy} min → bumping to ${bumpQuantity} ${buyBaseAsset} ($${(bumpQuantity * currentPrice).toFixed(2)})`);
+          params.quantity = bumpQuantity;
+          requiredUSDT = bumpQuantity * currentPrice;
         } else {
-          // NO - you CAN'T afford the minimum, so OVERRIDE it
-          console.warn(`   [MinTrade Override] Buy order value ($${requiredUSDT.toFixed(2)}) is below minimum requirement ($${minUSDTForBuy}), but available balance ($${availableUSDT.toFixed(2)}) cannot support the minimum. Proceeding with available balance.`);
+          // Can't afford the minimum — REJECT, don't send a doomed order to Binance
+          const error = `Insufficient balance ($${availableUSDT.toFixed(2)}) to meet minimum trade ($${minUSDTForBuy}). Buy blocked.`;
+          console.warn(`   [MinTrade Reject] ${error}`);
+          return { success: false, action: 'buy', error, insufficientBalance: true };
         }
       }
 
@@ -485,8 +520,10 @@ class AutoTrader {
           console.warn(`   [MinTrade Failed] ${error}`);
           return { success: false, action: 'buy', error };
         } else {
-          // Balance is too low to meet minimum anyway
-          console.warn(`   [MinTrade Override] Order value ($${finalRequiredUSDT.toFixed(2)}) is below minimum ($${minUSDTForBuy}) due to price adjustments and low balance ($${availableUSDT.toFixed(2)}). Proceeding with available balance.`);
+          // Balance is too low to meet minimum — REJECT, don't send a doomed order
+          const error = `Insufficient balance ($${availableUSDT.toFixed(2)}) to meet minimum trade ($${minUSDTForBuy}) after adjustments. Buy blocked.`;
+          console.warn(`   [MinTrade Reject] ${error}`);
+          return { success: false, action: 'buy', error, insufficientBalance: true };
         }
       }
 
@@ -495,8 +532,77 @@ class AutoTrader {
       const result = await this.binance.Buy(correctedQuantity, orderPrice, symbol);
 
       if (!result.success) {
-        console.log(`   ⚠️  Order could not be placed: ${result.error}`);
-        return { success: false, action: 'buy', error: result.error };
+        const ec = result.errorCode || 'UNKNOWN';
+        console.log(`   ⚠️  Order failed [${ec}]: ${result.error}`);
+
+        // ── Structured error handling for every known Binance rejection ──
+        switch (ec) {
+          case 'NOTIONAL': {
+            // Order value too small for Binance's NOTIONAL filter.
+            // Try ONE bump: recalculate quantity to meet the minimum notional.
+            console.log(`   [NOTIONAL Recovery] Attempting to bump order to meet minimum notional...`);
+            try {
+              const exchInfo = await this.binance.GetExchangeInfo(symbol);
+              const notionalFilter = exchInfo?.filters?.find(f => f.filterType === 'NOTIONAL');
+              const minNotional = notionalFilter ? parseFloat(notionalFilter.minNotional) : 5;
+              const livePrice = await this.binance.GetPrice(symbol);
+              // Need qty such that qty * price >= minNotional. Add 5% margin.
+              const bumpQty = Math.ceil((minNotional * 1.05) / livePrice * 10000000) / 10000000;
+              const bumpCost = bumpQty * livePrice;
+
+              if (bumpCost > availableUSDT) {
+                console.warn(`   [NOTIONAL Recovery] Can't afford bumped order ($${bumpCost.toFixed(2)} > $${availableUSDT.toFixed(2)}). Buy blocked.`);
+                return { success: false, action: 'buy', error: `NOTIONAL: need $${minNotional} but balance is $${availableUSDT.toFixed(2)}`, insufficientBalance: true };
+              }
+
+              console.log(`   [NOTIONAL Recovery] Retrying with ${bumpQty} ${buyBaseAsset} ($${bumpCost.toFixed(2)}) to clear $${minNotional} minimum...`);
+              const retryResult = await this.binance.Buy(bumpQty, null, symbol);
+              if (!retryResult.success) {
+                console.warn(`   [NOTIONAL Recovery] Retry also failed: ${retryResult.error}`);
+                return { success: false, action: 'buy', error: retryResult.error, insufficientBalance: true };
+              }
+              // Retry succeeded — continue with the rest of the success path
+              console.log(`   [NOTIONAL Recovery] ✅ Retry succeeded!`);
+              // Overwrite variables so the downstream code (trade save, Cranks) uses the retried order
+              Object.assign(result, retryResult);
+              correctedQuantity = bumpQty;
+            } catch (retryErr) {
+              console.error(`   [NOTIONAL Recovery] Exception during retry: ${retryErr.message}`);
+              return { success: false, action: 'buy', error: result.error, insufficientBalance: true };
+            }
+            break;
+          }
+
+          case 'INSUFFICIENT_BALANCE':
+            console.warn(`   [Binance] Insufficient balance on exchange. Stopping buy attempts.`);
+            return { success: false, action: 'buy', error: result.error, insufficientBalance: true };
+
+          case 'LOT_SIZE':
+          case 'MARKET_LOT_SIZE':
+            console.warn(`   [Binance] Quantity ${correctedQuantity} rejected by LOT_SIZE filter. Order blocked.`);
+            return { success: false, action: 'buy', error: result.error };
+
+          case 'PERCENT_PRICE':
+          case 'PRICE_FILTER':
+            console.warn(`   [Binance] Price filter rejection — market may be too volatile. Order blocked.`);
+            return { success: false, action: 'buy', error: result.error };
+
+          case 'MAX_ORDERS':
+            console.warn(`   [Binance] Too many open orders. Waiting for existing orders to fill.`);
+            return { success: false, action: 'buy', error: result.error };
+
+          case 'RATE_LIMIT':
+            console.warn(`   [Binance] Rate limited by exchange. Will retry next iteration.`);
+            return { success: false, action: 'buy', error: result.error };
+
+          case 'TIMESTAMP':
+            console.warn(`   [Binance] Timestamp sync error. Check system clock.`);
+            return { success: false, action: 'buy', error: result.error };
+
+          default:
+            // Unknown / unclassified error — return as-is
+            return { success: false, action: 'buy', error: result.error };
+        }
       }
 
       // Use actual fill price from Binance MARKET order response (cummulativeQuoteQty / origQty)
@@ -559,12 +665,12 @@ class AutoTrader {
       // Check Settings constraints for SELL
       const tradingRules = Settings.Trading?.Rules || {};
       const balanceReqs = tradingRules.BalanceRequirements || { MinUSDTForBuy: 15, MinAssetValueForSell: 15 };
-      const profitTargets = tradingRules.ProfitTargets || { MinProfitPercentToSell: 2 };
+      const profitTargets = tradingRules.ProfitTargets || { MinProfitPercentToSell: 4 };
       const lossPrevention = tradingRules.LossPrevention || { StrictlyNoLosses: true };
       const currentPrice = price || (await this.binance.GetPrice(symbol));
       const sellValue = quantity * currentPrice;
       const minAssetValueForSell = balanceReqs.MinAssetValueForSell || 15;
-      const minProfitPercent = profitTargets.MinProfitPercentToSell || 2;
+      const minProfitPercent = profitTargets.MinProfitPercentToSell || 4;
 
       // Check if account has sufficient balance to sell this quantity
       // Derive baseAsset from symbol (e.g. UNIUSDT → UNI, LTCUSDT → LTC)
@@ -701,8 +807,44 @@ class AutoTrader {
       const result = await this.binance.Sell(correctedQuantity, orderPrice, symbol);
 
       if (!result.success) {
-        console.log(`   ⚠️  Order could not be placed: ${result.error}`);
-        return { success: false, action: 'sell', error: result.error };
+        const ec = result.errorCode || 'UNKNOWN';
+        console.log(`   ⚠️  Sell order failed [${ec}]: ${result.error}`);
+
+        // Structured error handling for sell-side Binance errors
+        switch (ec) {
+          case 'NOTIONAL':
+            console.warn(`   [Binance] Sell value below NOTIONAL minimum. Order blocked.`);
+            return { success: false, action: 'sell', error: result.error };
+
+          case 'INSUFFICIENT_BALANCE':
+            console.warn(`   [Binance] Insufficient asset balance to sell. Order blocked.`);
+            return { success: false, action: 'sell', error: result.error };
+
+          case 'LOT_SIZE':
+          case 'MARKET_LOT_SIZE':
+            console.warn(`   [Binance] Quantity ${correctedQuantity} rejected by LOT_SIZE filter.`);
+            return { success: false, action: 'sell', error: result.error };
+
+          case 'PERCENT_PRICE':
+          case 'PRICE_FILTER':
+            console.warn(`   [Binance] Price filter rejection — market too volatile.`);
+            return { success: false, action: 'sell', error: result.error };
+
+          case 'MAX_ORDERS':
+            console.warn(`   [Binance] Too many open orders.`);
+            return { success: false, action: 'sell', error: result.error };
+
+          case 'RATE_LIMIT':
+            console.warn(`   [Binance] Rate limited. Will retry next iteration.`);
+            return { success: false, action: 'sell', error: result.error };
+
+          case 'TIMESTAMP':
+            console.warn(`   [Binance] Timestamp sync error. Check system clock.`);
+            return { success: false, action: 'sell', error: result.error };
+
+          default:
+            return { success: false, action: 'sell', error: result.error };
+        }
       }
 
       // Use actual fill price from Binance MARKET order response (cummulativeQuoteQty / origQty)
@@ -859,8 +1001,8 @@ class AutoTrader {
       // Pre-sell profit check (same safety as _ExecuteSell) — StrictlyNoLosses applies here too
       const tradingRules = Settings.Trading?.Rules || {};
       const lossPrevention = tradingRules.LossPrevention || { StrictlyNoLosses: true };
-      const profitTargets = tradingRules.ProfitTargets || { MinProfitPercentToSell: 2 };
-      const minProfitPercent = profitTargets.MinProfitPercentToSell || 2;
+      const profitTargets = tradingRules.ProfitTargets || { MinProfitPercentToSell: 4 };
+      const minProfitPercent = profitTargets.MinProfitPercentToSell || 4;
 
       if (lossPrevention.StrictlyNoLosses || minProfitPercent > 0) {
         if (this.tradeDB) {
