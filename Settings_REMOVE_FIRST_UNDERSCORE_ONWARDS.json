@@ -33,9 +33,9 @@
         "PreservationPercent": 0.1
       },
       "PositionSizing": {
-        "BuyPercentOfBalance": 0.1,
+        "BuyPercentOfBalance": 0.15,
         "SellPercentOfHolding": 0.95,
-        "MaxSingleTradePercent": 0.1
+        "MaxSingleTradePercent": 0.15
       },
       "ProfitTargets": {
         "MinProfitPercentToSell": 2,
