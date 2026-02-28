@@ -636,6 +636,17 @@ class AutoTrader {
           this.cranks.create(buyBaseAsset, buyCostUSD);
         }
       }
+
+      // Notify Discord of the buy
+      try {
+        await process.discord?.NotifyTrade({
+          action: 'buy',
+          pair: symbol || 'LTCUSDT',
+          quantity: correctedQuantity,
+          price: actualFillPrice,
+          orderId: result.order?.orderId,
+        });
+      } catch (_) { /* non-critical */ }
       
       return {
         success: true,
@@ -915,6 +926,19 @@ class AutoTrader {
           console.warn(`   [Cranks] Failed to update: ${cranksErr.message}`);
         }
       }
+
+      // Notify Discord of the sell
+      try {
+        await process.discord?.NotifyTrade({
+          action: 'sell',
+          pair: symbol || 'LTCUSDT',
+          quantity: correctedQuantity,
+          price: actualSellPrice,
+          orderId: result.order?.orderId,
+          profitLoss,
+          profitLossPercent,
+        });
+      } catch (_) { /* non-critical */ }
       
       return {
         success: true,

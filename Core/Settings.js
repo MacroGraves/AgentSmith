@@ -1,19 +1,37 @@
 /**
  * Settings Loader — AgentSmith
  * 
- * Loads configuration from the MySQL Settings table and exposes it
- * as a nested object identical to the old Settings.json structure.
+ * Loads configuration from multiple MySQL tables and exposes it
+ * as a unified nested object.
+ * 
+ * Table routing:
+ *   Settings table  → Trading.*, OnRestart.*, System.*, GPT.* (dot-notation keys)
+ *   Secrets  table  → {service}.{key} where key is Token, API_Key, API_Secret, etc.
+ *   Discord  table  → Discord.{key}
+ *   Binance  table  → Binance.{key}  (+ other exchange tables)
  * 
  * Usage:
  *   const Settings = require('./Core/Settings');
- *   await Settings.Load();            // Load all settings from DB
- *   const val = Settings.Get('Trading.Rules.MinimumTradeValue');  // 5
- *   const obj = Settings.Trading;     // Full nested object access
- *   await Settings.Set('Trading.Rules.MinimumTradeValue', 10);   // Update in DB
+ *   await Settings.Load();
+ *   const val = Settings.Get('Trading.Rules.MinimumTradeValue');
+ *   const obj = Settings.Trading;
+ *   await Settings.Set('Trading.Rules.MinimumTradeValue', 10);
  */
 
 const MySQL = require('promise-mysql');
 const Config = require('../MySQL.json');
+
+// Tables that have their own dedicated key/value store
+const SERVICE_TABLES = ['Discord', 'Binance', 'Kraken', 'KuCoin', 'UniSwap', 'PancakeSwap', 'Raydium'];
+
+// Full dot-notation keys that route to the Secrets table
+const SECRET_KEYS = new Set([
+  'Discord.Token',
+  'Binance.API_Key', 'Binance.API_Secret',
+  'OpenAI.API_Key',
+  'Kraken.API_Key', 'Kraken.API_Secret',
+  'KuCoin.API_Key', 'KuCoin.API_Secret',
+]);
 
 class Settings {
   constructor() {
@@ -58,24 +76,38 @@ class Settings {
   // ─── Load ───────────────────────────────────────────────────────────────
 
   /**
-   * Load all settings from MySQL into memory
+   * Load all settings from every source table into memory
    * @returns {Promise<boolean>}
    */
   async Load() {
     try {
-      const rows = await this._query('SELECT `key`, `value` FROM Settings');
       this._flat = {};
       this._nested = {};
 
-      for (const row of (rows || [])) {
-        let parsed;
-        try {
-          parsed = JSON.parse(row.value);
-        } catch (_) {
-          parsed = row.value;
+      // 1. Settings table — keys are full dot-notation
+      const settingsRows = await this._query('SELECT `key`, `value` FROM Settings');
+      for (const row of (settingsRows || [])) {
+        this._store(row.key, row.value);
+      }
+
+      // 2. Secrets table — composite key (service, key) → {service}.{key}
+      try {
+        const secretRows = await this._query('SELECT `key`, `value`, `service` FROM Secrets');
+        for (const row of (secretRows || [])) {
+          const fullKey = `${row.service}.${row.key}`;
+          this._store(fullKey, row.value);
         }
-        this._flat[row.key] = parsed;
-        this._setNested(row.key, parsed);
+      } catch (_) { /* Secrets table may not exist yet */ }
+
+      // 3. Service tables (Discord, Binance, exchanges) — key → {Table}.{key}
+      for (const table of SERVICE_TABLES) {
+        try {
+          const rows = await this._query(`SELECT \`key\`, \`value\` FROM \`${table}\``);
+          for (const row of (rows || [])) {
+            const fullKey = `${table}.${row.key}`;
+            this._store(fullKey, row.value);
+          }
+        } catch (_) { /* Table may not exist yet */ }
       }
 
       this._loaded = true;
@@ -86,12 +118,23 @@ class Settings {
     }
   }
 
+  /**
+   * Parse a JSON-encoded DB value and store in flat + nested caches
+   * @private
+   */
+  _store(key, rawValue) {
+    let parsed;
+    try { parsed = JSON.parse(rawValue); } catch (_) { parsed = rawValue; }
+    this._flat[key] = parsed;
+    this._setNested(key, parsed);
+  }
+
   // ─── Get / Set ──────────────────────────────────────────────────────────
 
   /**
    * Get a setting by dot-notation key
-   * @param {string} key - e.g. 'Trading.Rules.MinimumTradeValue'
-   * @param {*} defaultValue - Fallback if key not found
+   * @param {string} key
+   * @param {*} defaultValue
    * @returns {*}
    */
   Get(key, defaultValue = undefined) {
@@ -100,21 +143,43 @@ class Settings {
   }
 
   /**
-   * Set a setting value (updates DB and in-memory cache)
+   * Set a setting value — routes to the correct table automatically
    * @param {string} key - Dot-notation key
-   * @param {*} value - New value
-   * @param {string} [category] - Category (auto-resolved from key if omitted)
+   * @param {*} value
+   * @param {string} [category]
    * @returns {Promise<boolean>}
    */
   async Set(key, value, category = null) {
     try {
-      const cat = category || key.split('.')[0];
       const jsonValue = JSON.stringify(value);
-      await this._query(
-        `INSERT INTO Settings (\`key\`, \`value\`, category) VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE \`value\` = VALUES(\`value\`), updated_at = CURRENT_TIMESTAMP`,
-        [key, jsonValue, cat]
-      );
+      const topLevel = key.split('.')[0];
+      const subKey = key.split('.').slice(1).join('.');
+
+      if (SECRET_KEYS.has(key)) {
+        // → Secrets table (composite PK: service + key)
+        await this._query(
+          `INSERT INTO Secrets (\`key\`, \`value\`, service) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE \`value\` = VALUES(\`value\`), updated_at = CURRENT_TIMESTAMP`,
+          [subKey, jsonValue, topLevel]
+        );
+      } else if (SERVICE_TABLES.includes(topLevel) && subKey) {
+        // → Dedicated service table (Discord, Binance, etc.)
+        await this._query(
+          `INSERT INTO \`${topLevel}\` (\`key\`, \`value\`) VALUES (?, ?)
+           ON DUPLICATE KEY UPDATE \`value\` = VALUES(\`value\`), updated_at = CURRENT_TIMESTAMP`,
+          [subKey, jsonValue]
+        );
+      } else {
+        // → Settings table (full dot-notation key)
+        const cat = category || topLevel;
+        await this._query(
+          `INSERT INTO Settings (\`key\`, \`value\`, category) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE \`value\` = VALUES(\`value\`), updated_at = CURRENT_TIMESTAMP`,
+          [key, jsonValue, cat]
+        );
+      }
+
+      // Update in-memory cache
       this._flat[key] = value;
       this._setNested(key, value);
       return true;
@@ -137,6 +202,14 @@ class Settings {
       }
     }
     return result;
+  }
+
+  /**
+   * Get all flat key/value pairs (for listing all settings)
+   * @returns {Object}
+   */
+  GetAll() {
+    return { ...this._flat };
   }
 
   // ─── Nested Object Access (Proxy) ──────────────────────────────────────

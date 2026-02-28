@@ -1,517 +1,329 @@
 # AgentSmith
 
-Autonomous crypto trading bot. GPT decides when to buy and sell, Binance executes orders, MySQL keeps the audit trail. All configuration lives in MySQL — the only file-based config is `MySQL.json`.
+Autonomous crypto trading bot powered by GPT decision-making. Executes real trades on Binance via a four-step AI reasoning chain (Think → Validate → Act → Reflect), with a Discord control panel, cascading profit lockup (Cranks), and strict loss prevention.
 
 ---
 
-## Table of Contents
+## Architecture
 
-- [Features](#features)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Architecture](#architecture)
-- [GPT Decision Cycle](#gpt-decision-cycle)
-- [Safety Systems](#safety-systems)
-- [Discord Bot](#discord-bot)
-- [Logging](#logging)
-- [Project Structure](#project-structure)
-- [Database Schema](#database-schema)
-- [Troubleshooting](#troubleshooting)
-- [TODO](#todo)
-- [License](#license)
+```mermaid
+graph TD
+  CLI[CLI / PM2] -->|starts| IDX[index.js]
+  IDX --> S[Settings Loader]
+  IDX --> BX[Binance Exchange]
+  IDX --> GPT[GPT Wrapper]
+  IDX --> AT[AutoTrader]
+  IDX --> DC[Discord Bot]
+
+  S -->|reads| DB[(MySQL)]
+
+  AT --> GPT
+  AT --> BX
+  AT -->|saves| TDB[TradeDB / History]
+  AT -->|ratchets| CR[Cranks]
+  AT -->|notifies| DC
+
+  GPT -->|4-step chain| DDB[DecisionDB]
+
+  DC -->|/start /stop| IDX
+  DC -->|/config /modify /exchange| S
+  DC -->|/trades /balance /status| BX
+
+  subgraph Database
+    DB
+    TDB
+    DDB
+  end
+```
 
 ---
 
-## Features
+## GPT Decision Cycle
 
-- **GPT-driven trading** — 4-step decision cycle (Think → Validate → Act → Reflect) per iteration
-- **Intelligent pair rotation** — scores USDT pairs by volatility, volume, and trend; selects the best opportunity each cycle
-- **GPT-controlled position sizing** — GPT chooses buy % (5–20) based on confidence; system enforces hard caps
-- **Cranks safety system** — cascading profit ratchets that permanently lock gains as USDC
-- **Loss prevention** — `StrictlyNoLosses` mode blocks any sell below entry price
-- **Profit gate** — minimum 4% profit required before selling is allowed
-- **Market analysis** — 24h trend detection, volatility scoring, and recommendation signals
-- **Full audit trail** — every decision, reasoning chain, and order persisted to MySQL
-- **Discord bot** — modular slash commands with modals for live control and monitoring
-- **Auto-bootstrap** — database tables, views, and default settings created automatically on first run
-- **MySQL-based config** — all settings stored in a `Settings` table; no `Settings.json` needed
-- **PM2 ready** — runs as a daemon with auto-restart
+Every trading iteration sends market context through a four-step reasoning chain:
 
-## Requirements
+```mermaid
+flowchart LR
+  Q[Market Context] --> T[Think]
+  T --> V[Validate]
+  V --> A[Act]
+  A --> R[Reflect]
+  R -->|next action| A
+  A -->|buy / sell / wait| E[Execute]
+  E --> BX[Binance API]
+  E --> DC[Discord Notify]
+```
 
-- Node.js 18+
-- MySQL 5.7+ or MariaDB 10.3+
-- Binance API key (spot trading enabled)
-- OpenAI API key
-- Discord bot token (optional — for remote control)
+GPT controls **position sizing** (5–20% of balance per trade), decides entry/exit points, and sets recheck timing. The system enforces hard constraints: minimum 4% profit before selling, strict loss prevention, and balance caps.
 
-## Installation
+---
+
+## Cranks Safety System
+
+Profits cascade through four ratchets toward permanent USDC lockup:
+
+```mermaid
+flowchart TD
+  P[Profit from trade] --> R0[Crank 0 — Active]
+  R0 -->|fills| R1[Crank 1 — Safety 1]
+  R1 -->|fills| R2[Crank 2 — Safety 2]
+  R2 -->|fills| R3[Crank 3 — Lockup Zone]
+  R3 -->|threshold met| USDC[Permanent USDC Lockup]
+```
+
+Once profit reaches the conversion threshold (default $100), it's permanently converted to USDC—irreversible capital preservation.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- **Node.js** ≥ 18
+- **MySQL / MariaDB** — database named `agentsmith`
+- **Binance** account with API key/secret
+- **OpenAI** API key
+- **Discord** bot application (optional)
+
+### Install
 
 ```bash
-git clone https://github.com/user/AgentSmith.git
-cd AgentSmith
+git clone <repo> && cd AgentSmith
 npm install
 ```
 
-### API Keys
+### Configure
 
-Create the following files (plain text, no JSON):
-
-| File | Contents |
-|------|----------|
-| `.Keys/OpenAI.key` | OpenAI API key |
-| `.Keys/Binance/API.key` | Binance API key |
-| `.Keys/Binance/API.secret` | Binance API secret |
-
-### Database
-
-1. Create the database and configure `MySQL.json`:
-
-```bash
-mysql -u root -p -e "CREATE DATABASE agentsmith;"
-```
-
-2. Edit `MySQL.json` with your connection details:
+1. Create `MySQL.json` in project root:
 
 ```json
 {
   "host": "127.0.0.1",
   "port": 3306,
   "user": "root",
-  "password": "",
-  "database": "agentsmith",
-  "socketPath": "/var/run/mysqld/mysqld.sock"
+  "password": "yourpassword",
+  "database": "agentsmith"
 }
 ```
 
-3. Run the bot — tables, views, and default settings are created automatically if they don't exist. Or set up manually:
+2. Create API key files:
+
+```
+.Keys/
+  OpenAI.key          ← OpenAI API key (plain text)
+  Binance/
+    API.key           ← Binance API key
+    API.secret        ← Binance API secret
+```
+
+3. First run auto-creates all database tables and seeds defaults:
 
 ```bash
-node Database.js --nuke --seed
+node index.js --loop
 ```
+
+Or manually set up the schema:
+
+```bash
+node Database.js --seed
+```
+
+4. Configure Discord (optional) — set values in the Discord and Secrets tables via MySQL or the `/config` command after first run.
+
+### Run
+
+```bash
+# Continuous trading (starts PAUSED — use Discord /start to begin)
+node index.js --loop
+
+# Fixed number of iterations
+node index.js --count=10
+
+# With PM2
+pm2 start ecosystem.config.js
+```
+
+The bot starts **paused by default**. Use the Discord `/start` command to begin trading.
+
+---
+
+## CLI Arguments
 
 | Flag | Description |
 |------|-------------|
-| *(none)* | Create tables if missing |
-| `--nuke` | Drop everything and recreate from scratch |
-| `--seed` | Seed default settings into the Settings table |
+| `--loop` | Run continuously until stopped |
+| `--count=N` | Run exactly N iterations |
+| `--test` | Test mode (no real trades) |
+| `--fast` | 5-second wait between iterations |
+| `--log=<filter>` | Filter logs: `gpt`, `pairs`, `numbers`, `logic`, `trading`, `loop`, `all` |
 
-## Configuration
-
-All configuration lives in the MySQL `Settings` table (dot-notation keys). Edit via Discord `/modify` modal, `/config` command, or directly in MySQL.
-
-### Trading Rules
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `Trading.Rules.BalanceRequirements.MinUSDTForBuy` | 5 | Minimum USDT required to place a buy |
-| `Trading.Rules.BalanceRequirements.MinAssetValueForSell` | 5 | Minimum asset value to place a sell |
-| `Trading.Rules.PositionSizing.GPTControlled` | true | GPT chooses buy % per trade based on conviction |
-| `Trading.Rules.PositionSizing.DefaultPercent` | 15 | Default buy % if GPT doesn't specify |
-| `Trading.Rules.PositionSizing.MinPercent` | 5 | Minimum buy % GPT can choose |
-| `Trading.Rules.PositionSizing.MaxPercent` | 20 | Hard cap — maximum buy % per trade |
-| `Trading.Rules.PositionSizing.SellPercentOfHolding` | 0.95 | Fraction of holding to sell per order |
-| `Trading.Rules.ProfitTargets.MinProfitPercentToSell` | 4 | Minimum profit % before selling (profit gate) |
-| `Trading.Rules.ProfitTargets.PreferredProfitPercent` | 6 | Preferred profit target % |
-| `Trading.Rules.ProfitTargets.TakeProfitAt` | 10 | Auto-take-profit threshold % |
-| `Trading.Rules.LossPrevention.StrictlyNoLosses` | true | Block all sells below entry price |
-| `Trading.Rules.Timeframes.CheckIntervalSeconds` | 60 | Seconds between trading iterations |
-
-### Cranks (Annihilation Prevention)
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `Trading.Cranks.Enabled` | true | Enable the cascading ratchet system |
-| `Trading.Cranks.ConversionThreshold` | 100 | USDC conversion threshold in dollars |
-
-### OnRestart Behaviour
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `OnRestart.Clear_Decisions` | true | Clear Decisions table on restart |
-| `OnRestart.Clear_Loops` | true | Clear Loops table on restart |
-| `OnRestart.Clear_History` | true | Clear History table on restart |
-| `OnRestart.Clear_Cranks` | true | Clear Cranks table on restart |
-| `OnRestart.Sell_All` | false | Sell all open positions on restart |
-
-### Discord
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `Discord.Enabled` | false | Enable the Discord bot |
-| `Discord.Token` | *(empty)* | Bot token |
-| `Discord.ClientID` | *(empty)* | Application Client ID |
-| `Discord.GuildID` | *(empty)* | Server (guild) ID |
-| `Discord.Staff_Role` | *(empty)* | Role ID required for command access |
-| `Discord.Warnings_Channel` | *(empty)* | Channel for warning alerts |
-| `Discord.Status_Channel` | *(empty)* | Channel for status updates |
-
-### Test Mode
-
-Set `Trading.TestMode.Enabled: true` to simulate decisions without placing real orders.
-
-## Usage
-
-### Direct
-
-```bash
-node index.js
-```
-
-### With PM2
-
-```bash
-pm2 start ecosystem.config.js
-pm2 logs 0
-```
-
-### CLI Flags
-
-| Flag | Example | Description |
-|------|---------|-------------|
-| `--log` | `--log=numbers` | Filter log output (`numbers`, `gpt`, `trading`, `loop`, `pairs`, `all`) |
-| `--fast` | `--fast` | Reduce wait time between iterations |
-| `--count` | `--count=10` | Run a fixed number of iterations then exit |
-| `--sell_all` | `--sell_all` | Sell all positions on startup then continue |
-
-## Architecture
-
-```mermaid
-graph TD
-    subgraph Entry["🚀 Entry Point"]
-        INDEX["index.js<br/>Main Loop"]
-    end
-
-    subgraph AI["🧠 AI Engine"]
-        GPT["GPT.js<br/>4-Step Decision Cycle"]
-    end
-
-    subgraph Trading["📈 Trading"]
-        AT["AutoTrader.js<br/>Order Executor"]
-        PS["PairSelector.js<br/>Pair Rotation"]
-        MA["MarketAnalysis.js<br/>Trend & Volatility"]
-    end
-
-    subgraph Exchange["💱 Exchange"]
-        BIN["Binance.js<br/>REST Adapter"]
-    end
-
-    subgraph Safety["🛡️ Safety Systems"]
-        CR["Cranks.js<br/>Profit Ratchets"]
-    end
-
-    subgraph Persistence["🗄️ MySQL"]
-        DDB["DecisionDB"]
-        TDB["TradeDB"]
-        PDB["PairDB"]
-        SET["Settings"]
-    end
-
-    subgraph Bot["🤖 Discord"]
-        DISC["Discord Bot<br/>Slash Commands"]
-    end
-
-    INDEX --> PS
-    PS --> MA
-    PS --> GPT
-    GPT --> AT
-    AT --> BIN
-    AT --> CR
-    AT --> TDB
-    GPT --> DDB
-    PS --> PDB
-    INDEX --> DISC
-    INDEX --> SET
-
-    style Entry fill:#1a1a2e,stroke:#e94560,color:#fff
-    style AI fill:#16213e,stroke:#0f3460,color:#fff
-    style Trading fill:#1a1a2e,stroke:#e94560,color:#fff
-    style Exchange fill:#0f3460,stroke:#533483,color:#fff
-    style Safety fill:#2d132c,stroke:#e94560,color:#fff
-    style Persistence fill:#16213e,stroke:#0f3460,color:#fff
-    style Bot fill:#1a1a2e,stroke:#533483,color:#fff
-```
-
-## GPT Decision Cycle
-
-Each iteration, GPT runs a 4-step reasoning chain before outputting an action:
-
-```mermaid
-graph LR
-    T["🧠 Think<br/>Analyse market,<br/>balances, positions"]
-    V["✅ Validate<br/>Check constraints,<br/>profit gates, caps"]
-    A["⚡ Act<br/>Output action:<br/>buy / sell / wait"]
-    R["🔄 Reflect<br/>Evaluate quality<br/>for next iteration"]
-
-    T --> V --> A --> R --> T
-
-    style T fill:#0f3460,stroke:#e94560,color:#fff
-    style V fill:#16213e,stroke:#0f3460,color:#fff
-    style A fill:#533483,stroke:#e94560,color:#fff
-    style R fill:#2d132c,stroke:#533483,color:#fff
-```
-
-### Supported Actions
-
-| Action | Type | Description |
-|--------|------|-------------|
-| `buy` | Market order | Buy asset at current price (with GPT-controlled %) |
-| `sell` | Market order | Sell asset at current price |
-| `buyatprice` | Limit order | Buy at specified price |
-| `sellatprice` | Limit order | Sell at specified price |
-| `query` | Info | Fetch price or balance |
-| `wait` | Delay | Wait N seconds |
-| `complete` | Terminal | End loop successfully |
-| `stop` / `error` | Terminal | End loop on failure |
-
-## Safety Systems
-
-### Position Sizing
-
-GPT controls buy sizing dynamically by including a `percent` field (5–20) in its buy action. The system enforces:
-
-- **Hard max**: 20% of available USDT per single trade
-- **Hard min**: Trades below `MinUSDTForBuy` ($5) are rejected
-- **Default**: 15% if GPT doesn't specify a percent
-- GPT sizing guidance: small dip (<2%) → 5–10%, medium dip (2–5%) → 10–15%, large dip (>5%) → 15–20%
-
-### Cranks Ratchets
-
-Profits cascade through 4 ratchets per coin, permanently locking gains:
-
-```mermaid
-graph LR
-    R0["R0<br/>Active Trading<br/>Zone"]
-    R1["R1<br/>Safety<br/>Buffer 1"]
-    R2["R2<br/>Safety<br/>Buffer 2"]
-    R3["R3<br/>Lock<br/>Trigger"]
-    USDC["🔒 USDC<br/>Permanently<br/>Locked"]
-
-    R0 -- "overflow at 2×" --> R1
-    R1 -- "overflow at 2×" --> R2
-    R2 -- "overflow at 2×" --> R3
-    R3 -- "R3 fills" --> USDC
-
-    LOSS["📉 Losses"] -.-> R1
-    LOSS -.-> R2
-
-    style R0 fill:#0f3460,stroke:#e94560,color:#fff
-    style R1 fill:#16213e,stroke:#0f3460,color:#fff
-    style R2 fill:#533483,stroke:#0f3460,color:#fff
-    style R3 fill:#2d132c,stroke:#e94560,color:#fff
-    style USDC fill:#006400,stroke:#00ff00,color:#fff
-    style LOSS fill:#8b0000,stroke:#ff0000,color:#fff
-```
-
-- **R0** = active trading zone. MockBalance = sum of all R0 values (only restricts after first cascade)
-- Before any cascade: MockBalance is unlimited (100% of free USDT available)
-- When any ratchet reaches 2× the base amount, the overflow cascades right
-- When R3 fills, the base amount is permanently converted to USDC
-- Losses pull from R1/R2 to protect R0
-
-### Loss Prevention
-
-- `StrictlyNoLosses: true` — sell orders blocked if current price ≤ entry price
-- Entry price tracked per position via TradeDB
-- Profit gate: minimum 4% profit required before any sell (configurable)
-
-### Circuit Breakers
-
-- 5 consecutive errors pauses trading
-- 50 active loop cap prevents runaway processes
-- External balance changes detected and flagged
-- Exponential backoff on API failures (3 retries)
-- Per-pair buy cooldown prevents overtrading
+---
 
 ## Discord Bot
 
-Modular bot with auto-discovered slash commands. Requires `Discord.Enabled = true` and valid token/IDs in Settings.
-
 ```mermaid
-graph TD
-    BOT["Discord Bot"]
-
-    subgraph Trading["Trading Commands"]
-        START["/start"]
-        STOP["/stop"]
-        STATUS["/status"]
-        BAL["/balance"]
-        TRADES["/trades"]
-        SELL["/sell"]
-        PAIRS["/pairs"]
-    end
-
-    subgraph Config["Config Commands"]
-        MODIFY["/modify<br/>📋 Modal"]
-        CFG["/config"]
-        EXCH["/exchange"]
-    end
-
-    BOT --> Trading
-    BOT --> Config
-
-    style BOT fill:#5865F2,stroke:#fff,color:#fff
-    style Trading fill:#1a1a2e,stroke:#e94560,color:#fff
-    style Config fill:#16213e,stroke:#0f3460,color:#fff
-    style MODIFY fill:#533483,stroke:#e94560,color:#fff
-    style START fill:#006400,stroke:#00ff00,color:#fff
-    style STOP fill:#8b0000,stroke:#ff0000,color:#fff
+graph LR
+  subgraph Trading
+    start[/start]
+    stop[/stop]
+    status[/status]
+    balance[/balance]
+    trades[/trades]
+    sell[/sell]
+    pairs[/pairs]
+  end
+  subgraph Config
+    config[/config]
+    modify[/modify]
+    exchange[/exchange]
+  end
 ```
 
 ### Trading Commands
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Resume the trading loop |
-| `/stop` | Pause the trading loop |
-| `/status` | Overview — balance, open trades, % invested, crank totals |
-| `/balance` | Detailed breakdown of all held assets |
-| `/trades [count]` | Recent trade history |
-| `/sell <pair\|all>` | Sell a specific pair or all open positions |
-| `/pairs` | Active trading pairs ranked by score |
+| `/start` | Resume trading loop |
+| `/stop` | Pause trading loop |
+| `/status` | Show bot status, uptime, current pair |
+| `/balance` | Show exchange balances |
+| `/trades [count]` | Show recent trade history |
+| `/sell` | Manually trigger a sell |
+| `/pairs` | Show active trading pairs and scores |
 
 ### Config Commands
 
 | Command | Description |
 |---------|-------------|
-| `/modify` | Opens a **modal dialog** to edit core settings (position size, profit gate, cooldown, GPT model, trading enabled) |
-| `/config <key> [value]` | View or set a single setting by dot-notation key |
-| `/exchange <view\|set\|test>` | View exchange config (redacted), update API keys, or test the connection |
+| `/config` | List **all** settings grouped by category (secrets redacted) |
+| `/config key:<k>` | View a single setting |
+| `/config key:<k> value:<v>` | Update a setting |
+| `/modify` | Modal: edit position size, profit gate, cooldown, GPT model, trading enabled |
+| `/exchange` | Modal: configure Binance API keys, pair, testnet mode |
 
-### Adding Commands
+---
 
-Drop a `.js` file into `Discord/Commands/trading/` or `Discord/Commands/config/` — it's auto-loaded and registered on startup. Command file format:
+## Database Schema
 
-```js
-module.exports = {
-  name: 'example',
-  description: 'Description shown in Discord',
-  type: 1,
-  options: [],       // slash command options
-  cooldown: 5000,    // ms cooldown per user (optional)
+All tables are auto-created on first run. Use `node Database.js --nuke` to drop and recreate everything.
 
-  run: async (client, interaction) => {
-    // command logic
-  },
+### Configuration Tables
 
-  // optional — handles modal submissions (customId: "example_modal")
-  handleModal: async (client, interaction) => { },
-};
-```
+| Table | Purpose |
+|-------|---------|
+| **Settings** | Application config — Trading rules, OnRestart, System, GPT settings |
+| **Secrets** | Sensitive credentials — API keys, tokens (composite PK: service + key) |
+| **Discord** | Discord bot config — ClientID, GuildID, channels, roles |
 
-## Logging
+### Exchange Tables
 
-Controlled by `Trading.Values_Only_Logging` in Settings or `--log` CLI flag.
+| Table | Purpose |
+|-------|---------|
+| **Binance** | Binance config — pair, testnet, quantity, targets |
+| **Kraken** | Kraken exchange config (future) |
+| **KuCoin** | KuCoin exchange config (future) |
+| **UniSwap** | UniSwap DEX config (future) |
+| **PancakeSwap** | PancakeSwap DEX config (future) |
+| **Raydium** | Raydium DEX config (future) |
 
-| Filter | Shows |
-|--------|-------|
-| `numbers` | Pair metrics, loop status, trade executions |
-| `gpt` | GPT prompts and responses |
-| `trading` | AutoTrader actions |
-| `pairs` | Pair selection and rotation |
-| `loop` | Loop iteration info |
-| `all` | Everything |
+### Trading Data Tables
 
-Errors and warnings always print regardless of filter. Logs also write to `output.log`.
+| Table | Purpose |
+|-------|---------|
+| **Decisions** | Full GPT chain-of-thought for every decision |
+| **Loops** | Autonomous trading session tracking |
+| **Actions** | Execution audit trail for GPT-decided actions |
+| **Snapshots** | Market data captured with each decision |
+| **Cranks** | Cranks safety system — cascading profit ratchets |
+| **History** | Executed trade history (buy/sell orders) |
+| **Pairs** | Trading pair analysis and rotation tracking |
+
+### Views
+
+| View | Description |
+|------|-------------|
+| `vw_action_summary` | Action counts and durations grouped by loop and type |
+| `vw_decision_chain` | Decision chain overview with primary actions |
+| `vw_loop_summary` | Loop status, duration, and decision counts |
+
+---
 
 ## Project Structure
 
 ```
 AgentSmith/
+├── index.js                    Entry point, trading loop, CLI
+├── Database.js                 Schema creator (tables, views, seeds)
+├── MySQL.json                  Database connection config
+├── ecosystem.config.js         PM2 configuration
+├── package.json
+│
 ├── Core/
-│   ├── AutoTrader.js        # Maps GPT decisions to exchange orders
-│   ├── Cranks.js             # Cascading profit ratchet system
-│   ├── DecisionDB.js         # Decision persistence (Decisions table)
-│   ├── ExchangeDiscovery.js  # Available exchange detection
-│   ├── GPT.js                # 4-step AI decision engine
-│   ├── KeyManager.js         # Credential loading from .Keys/
-│   ├── Logger.js             # File + console logging
-│   ├── MarketAnalysis.js     # Trend and volatility analysis
-│   ├── MigrationRunner.js    # DB schema migrations
-│   ├── PairDB.js             # Pair scoring persistence (Pairs table)
-│   ├── PairSelector.js       # Intelligent pair rotation
-│   ├── Settings.js           # MySQL Settings loader (singleton)
-│   ├── TradeDB.js            # Trade history persistence (History table)
-│   └── Utils.js              # DB connection helpers
-├── Discord/
-│   ├── index.js              # Entry point (singleton export)
-│   ├── Discord.js            # Bot class (client, events, cooldowns, modals)
-│   ├── handlers/
-│   │   └── Command.js        # Auto-loads commands, registers via REST API
-│   └── Commands/
-│       ├── trading/
-│       │   ├── start.js      #   /start
-│       │   ├── stop.js       #   /stop
-│       │   ├── status.js     #   /status
-│       │   ├── balance.js    #   /balance
-│       │   ├── trades.js     #   /trades
-│       │   ├── sell.js       #   /sell
-│       │   └── pairs.js      #   /pairs
-│       └── config/
-│           ├── modify.js     #   /modify (modal)
-│           ├── config.js     #   /config
-│           └── exchange.js   #   /exchange
+│   ├── AutoTrader.js           Trade executor — maps GPT decisions to orders
+│   ├── GPT.js                  OpenAI wrapper with 4-step chain
+│   ├── DecisionDB.js           Decision persistence
+│   ├── Settings.js             Multi-table settings loader (singleton)
+│   ├── TradeDB.js              Trade history persistence
+│   ├── PairDB.js               Pair analysis persistence
+│   ├── PairSelector.js         Intelligent pair rotation
+│   ├── Cranks.js               Cascading profit lockup system
+│   ├── MarketAnalysis.js       Technical analysis helpers
+│   ├── KeyManager.js           API key file loader
+│   ├── ExchangeDiscovery.js    Exchange detection
+│   ├── MigrationRunner.js      DB migration support
+│   ├── Logger.js               File + console logging
+│   └── Utils.js                Shared utilities
+│
 ├── Exchanges/
 │   ├── CEX/
-│   │   └── Binance.js        # Binance REST adapter
-│   └── DEX/                  # (placeholder)
-├── .Keys/                    # API credentials (gitignored)
-├── Database.js               # Programmatic schema creator + seeder
-├── MySQL.json                # Database connection config (only file-based config)
-├── index.js                  # Entry point and main trading loop
-├── ecosystem.config.js       # PM2 config
-└── package.json
+│   │   └── Binance.js          Binance API wrapper
+│   └── DEX/                    (future DEX integrations)
+│
+├── Discord/
+│   ├── Discord.js              Bot client, events, modal dispatch
+│   ├── handlers/
+│   │   └── Command.js          Slash command loader + REST registration
+│   └── Commands/
+│       ├── trading/
+│       │   ├── start.js        Resume trading
+│       │   ├── stop.js         Pause trading
+│       │   ├── status.js       Bot status
+│       │   ├── balance.js      Exchange balances
+│       │   ├── trades.js       Trade history
+│       │   ├── sell.js         Manual sell trigger
+│       │   └── pairs.js        Active pairs
+│       └── config/
+│           ├── config.js       View/edit all settings
+│           ├── modify.js       Modal: trading settings
+│           └── exchange.js     Modal: exchange config
+│
+├── Wallet/                     (legacy — unused)
+│   ├── Core.js
+│   ├── Transactions.js
+│   └── Users.js
+│
+└── .Keys/                      API key files (gitignored)
+    ├── OpenAI.key
+    └── Binance/
+        ├── API.key
+        └── API.secret
 ```
 
-## Database Schema
+---
 
-| Table | Description |
-|-------|-------------|
-| `Settings` | All application config (dot-notation keys, JSON values) |
-| `Decisions` | GPT decisions with full chain-of-thought reasoning |
-| `Loops` | Autonomous trading session tracking |
-| `Actions` | Execution audit trail for GPT-decided actions |
-| `Snapshots` | Market data captured with each decision |
-| `Cranks` | Per-coin ratchet state (R0–R3, locked USDC) |
-| `History` | Executed trade history (buys, sells, P/L) |
-| `Pairs` | Trading pair analysis, scores, and rotation |
+## Safety Features
 
-Views: `vw_action_summary`, `vw_decision_chain`, `vw_loop_summary`
+- **Strict Loss Prevention** — Never sells at a loss; minimum 4% profit gate enforced at execution
+- **Position Size Cap** — Hard maximum 20% of balance per trade (GPT controls 5–20%)
+- **Cranks Lockup** — Profits cascade toward permanent USDC conversion
+- **Balance Checks** — Pre-trade validation prevents insufficient balance errors
+- **Minimum Trade Value** — $5 floor on all buy/sell orders (Sell_All respects this too)
+- **External Modification Detection** — Halts trading if account is modified outside the bot
+- **Consecutive Error Limit** — Stops after 5 consecutive failures
+- **Per-Pair Buy Cooldown** — Prevents rapid-fire buying on the same pair
 
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| Bot buys nothing / always waits | Check `pm2 logs` for errors. Verify USDT balance ≥ `MinUSDTForBuy`. |
-| PM2 crash loop on startup | DB connection failing — check MySQL is running and `MySQL.json` is correct. |
-| `OpenAI.key not found` | Create `.Keys/OpenAI.key` with your API key (plain text). |
-| `Binance could not connect` | Verify `.Keys/Binance/API.key` and `API.secret` exist and contain valid keys. |
-| `BUY: NOT POSSIBLE (no trading budget)` | Cranks MockBalance is $0 — no trades exist yet. Auto-handled on first cycle. |
-| Order rejected by Binance | Check `Binance.minNotional` in Settings (default $10). |
-| Sells blocked despite profit | `StrictlyNoLosses` checks entry price from TradeDB. Verify the buy was recorded. Check `MinProfitPercentToSell`. |
-| Discord commands not registering | Ensure `Discord.ClientID`, `Discord.GuildID`, and `Discord.Token` are set in Settings. |
-| Tables missing on startup | Auto-created now. If issues persist: `node Database.js --nuke --seed` |
-
-## TODO
-
-- [ ] **Uniswap** — DEX integration (Ethereum)
-- [ ] **PancakeSwap** — DEX integration (BSC)
-- [ ] **Raydium** — DEX integration (Solana)
-- [x] **Binance** — CEX integration
-- [ ] **KuCoin** — CEX integration
-- [ ] **Kraken** — CEX integration
-- [ ] Multi-exchange arbitrage support
-- [ ] Apply additional LLMs for second opinions
-- [x] **Discord** — Modular slash command bot with modals
-- [x] **MySQL Settings** — Config migrated from JSON to database
-- [x] **Auto-bootstrap** — Schema + defaults created on first run
+---
 
 ## License
 
-MIT
-
-## Author
-
-MacroGraves
+Private — all rights reserved.

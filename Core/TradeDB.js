@@ -153,6 +153,26 @@ class TradeDB {
   }
 
   /**
+   * Get the most recent trades across all pairs
+   * @param {number} count - Number of trades to return
+   * @returns {Promise<Array>}
+   */
+  async GetRecentTrades(count = 10) {
+    try {
+      const sql = `
+        SELECT * FROM ${this.tableName}
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `;
+      const results = await this._query(sql, [count]);
+      return results || [];
+    } catch (error) {
+      console.error('[TradeDB] Failed to get recent trades:', error.message);
+      return [];
+    }
+  }
+
+  /**
    * Get trade statistics for today
    * @param {string} pair - Trading pair
    * @returns {Promise<Object>}

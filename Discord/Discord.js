@@ -92,7 +92,7 @@ class Discord {
 
   _setupEventListeners() {
     // Ready
-    this.client.once('ready', () => {
+    this.client.once('clientReady', () => {
       console.log(`[Discord] Bot online as ${this.client.user.tag}`);
       this.ready = true;
       this._updatePresence();
@@ -215,6 +215,41 @@ class Discord {
     } catch (err) {
       console.error(`[Discord] Send error: ${err.message}`);
     }
+  }
+
+  /**
+   * Send a trade notification (buy/sell) to the status channel
+   */
+  async NotifyTrade(data) {
+    const channelId = Settings.Get('Discord.Status_Channel', '');
+    if (!channelId) return;
+
+    const isBuy = data.action === 'buy';
+    const totalValue = (data.quantity * data.price).toFixed(2);
+    const title = isBuy ? '📈 BUY Executed' : '📉 SELL Executed';
+    const color = isBuy ? 0x00CC66 : 0xFF4444;
+
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setColor(color)
+      .addFields(
+        { name: 'Pair',     value: data.pair || 'N/A',                       inline: true },
+        { name: 'Quantity', value: `${data.quantity}`,                        inline: true },
+        { name: 'Price',    value: `$${data.price.toFixed(4)}`,               inline: true },
+        { name: 'Total',    value: `$${totalValue}`,                          inline: true },
+        { name: 'Order ID', value: `${data.orderId || 'N/A'}`,                inline: true },
+      );
+
+    if (!isBuy && data.profitLoss !== undefined) {
+      const plSign = data.profitLoss >= 0 ? '+' : '';
+      embed.addFields(
+        { name: 'P/L',   value: `${plSign}$${data.profitLoss.toFixed(4)}`,            inline: true },
+        { name: 'P/L %', value: `${plSign}${data.profitLossPercent.toFixed(2)}%`,     inline: true },
+      );
+    }
+
+    embed.setTimestamp();
+    await this.Send(channelId, embed);
   }
 
   /**

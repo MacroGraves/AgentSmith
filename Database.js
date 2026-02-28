@@ -34,13 +34,104 @@ const Tables = {
     CREATE TABLE IF NOT EXISTS Settings (
       \`key\` VARCHAR(128) PRIMARY KEY COMMENT 'Dot-notation key e.g. Trading.Rules.MinimumTradeValue',
       \`value\` TEXT NOT NULL COMMENT 'JSON-encoded value',
-      \`category\` VARCHAR(64) NOT NULL COMMENT 'Top-level grouping: Binance, Trading, OnRestart, Discord, etc.',
+      \`category\` VARCHAR(64) NOT NULL COMMENT 'Top-level grouping: Trading, OnRestart, System, GPT, etc.',
       \`description\` VARCHAR(255) DEFAULT NULL COMMENT 'Human-readable description',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       INDEX idx_category (category)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      COMMENT='Application configuration — replaces Settings.json'
+      COMMENT='Application configuration — non-sensitive settings'
+  `,
+
+  Secrets: `
+    CREATE TABLE IF NOT EXISTS Secrets (
+      \`key\` VARCHAR(128) NOT NULL COMMENT 'Secret name e.g. Token, API_Key, API_Secret',
+      \`value\` TEXT NOT NULL COMMENT 'JSON-encoded secret value',
+      \`service\` VARCHAR(64) NOT NULL COMMENT 'Service: Discord, Binance, OpenAI, Kraken, etc.',
+      \`description\` VARCHAR(255) DEFAULT NULL COMMENT 'Human-readable description',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (\`service\`, \`key\`),
+      INDEX idx_service (\`service\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='Sensitive credentials — API keys, tokens, secrets'
+  `,
+
+  Discord: `
+    CREATE TABLE IF NOT EXISTS Discord (
+      \`key\` VARCHAR(128) PRIMARY KEY COMMENT 'Config key e.g. Enabled, ClientID, GuildID',
+      \`value\` TEXT NOT NULL COMMENT 'JSON-encoded value',
+      \`description\` VARCHAR(255) DEFAULT NULL COMMENT 'Human-readable description',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='Discord bot configuration'
+  `,
+
+  Binance: `
+    CREATE TABLE IF NOT EXISTS Binance (
+      \`key\` VARCHAR(128) PRIMARY KEY COMMENT 'Config key e.g. pair, testnet, quantity',
+      \`value\` TEXT NOT NULL COMMENT 'JSON-encoded value',
+      \`description\` VARCHAR(255) DEFAULT NULL COMMENT 'Human-readable description',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='Binance exchange configuration'
+  `,
+
+  Kraken: `
+    CREATE TABLE IF NOT EXISTS Kraken (
+      \`key\` VARCHAR(128) PRIMARY KEY COMMENT 'Config key',
+      \`value\` TEXT NOT NULL COMMENT 'JSON-encoded value',
+      \`description\` VARCHAR(255) DEFAULT NULL COMMENT 'Human-readable description',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='Kraken exchange configuration'
+  `,
+
+  KuCoin: `
+    CREATE TABLE IF NOT EXISTS KuCoin (
+      \`key\` VARCHAR(128) PRIMARY KEY COMMENT 'Config key',
+      \`value\` TEXT NOT NULL COMMENT 'JSON-encoded value',
+      \`description\` VARCHAR(255) DEFAULT NULL COMMENT 'Human-readable description',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='KuCoin exchange configuration'
+  `,
+
+  UniSwap: `
+    CREATE TABLE IF NOT EXISTS UniSwap (
+      \`key\` VARCHAR(128) PRIMARY KEY COMMENT 'Config key',
+      \`value\` TEXT NOT NULL COMMENT 'JSON-encoded value',
+      \`description\` VARCHAR(255) DEFAULT NULL COMMENT 'Human-readable description',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='UniSwap DEX configuration'
+  `,
+
+  PancakeSwap: `
+    CREATE TABLE IF NOT EXISTS PancakeSwap (
+      \`key\` VARCHAR(128) PRIMARY KEY COMMENT 'Config key',
+      \`value\` TEXT NOT NULL COMMENT 'JSON-encoded value',
+      \`description\` VARCHAR(255) DEFAULT NULL COMMENT 'Human-readable description',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='PancakeSwap DEX configuration'
+  `,
+
+  Raydium: `
+    CREATE TABLE IF NOT EXISTS Raydium (
+      \`key\` VARCHAR(128) PRIMARY KEY COMMENT 'Config key',
+      \`value\` TEXT NOT NULL COMMENT 'JSON-encoded value',
+      \`description\` VARCHAR(255) DEFAULT NULL COMMENT 'Human-readable description',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='Raydium DEX configuration'
   `,
 
   Decisions: `
@@ -246,19 +337,9 @@ const Views = {
   `,
 };
 
-// ─── Default Settings Seed ──────────────────────────────────────────────────
+// ─── Default Seeds ──────────────────────────────────────────────────────────
 
 const DefaultSettings = [
-  // ── Binance ──
-  { key: 'Binance.testnet',      value: false,       category: 'Binance',  description: 'Use Binance testnet' },
-  { key: 'Binance.pair',         value: 'LTCUSDT',   category: 'Binance',  description: 'Default trading pair' },
-  { key: 'Binance.baseAsset',    value: 'LTC',       category: 'Binance',  description: 'Base asset ticker' },
-  { key: 'Binance.quoteAsset',   value: 'USDT',      category: 'Binance',  description: 'Quote asset ticker' },
-  { key: 'Binance.quantity',     value: 0.1,          category: 'Binance',  description: 'Default order quantity' },
-  { key: 'Binance.buyTarget',    value: 0.98,         category: 'Binance',  description: 'Buy target ratio' },
-  { key: 'Binance.sellTarget',   value: 1.02,         category: 'Binance',  description: 'Sell target ratio' },
-  { key: 'Binance.minNotional',  value: 10,           category: 'Binance',  description: 'Minimum notional value for orders' },
-
   // ── Trading Rules ──
   { key: 'Trading.Rules.MinimumTradeValue',                      value: 5,     category: 'Trading', description: 'Minimum trade value in USDT' },
   { key: 'Trading.Rules.BalanceRequirements.MinUSDTForBuy',      value: 5,     category: 'Trading', description: 'Minimum USDT balance to allow buying' },
@@ -310,18 +391,43 @@ const DefaultSettings = [
   { key: 'OnRestart.Clear_Cranks',    value: true,  category: 'OnRestart', description: 'Clear Cranks table on restart' },
   { key: 'OnRestart.Sell_All',        value: false, category: 'OnRestart', description: 'Sell all open positions on restart' },
 
-  // ── Discord ──
-  { key: 'Discord.Enabled',          value: false, category: 'Discord', description: 'Enable Discord bot' },
-  { key: 'Discord.ClientID',         value: '',    category: 'Discord', description: 'Discord application Client ID' },
-  { key: 'Discord.GuildID',          value: '',    category: 'Discord', description: 'Discord server (guild) ID' },
-  { key: 'Discord.Token',            value: '',    category: 'Discord', description: 'Discord bot token' },
-  { key: 'Discord.Staff_Role',       value: '',    category: 'Discord', description: 'Staff role ID for permission checks' },
-  { key: 'Discord.Warnings_Channel', value: '',    category: 'Discord', description: 'Channel ID for warning notifications' },
-  { key: 'Discord.Status_Channel',   value: '',    category: 'Discord', description: 'Channel ID for status updates' },
-
   // ── System ──
   { key: 'System.Production', value: true, category: 'System', description: 'Production mode flag' },
   { key: 'System.Debug',      value: true, category: 'System', description: 'Debug mode flag' },
+];
+
+// Secrets — sensitive API keys, tokens, etc.
+const DefaultSecrets = [
+  { key: 'Token',      service: 'Discord',  description: 'Discord bot token' },
+  { key: 'API_Key',    service: 'Binance',  description: 'Binance API key' },
+  { key: 'API_Secret', service: 'Binance',  description: 'Binance API secret' },
+  { key: 'API_Key',    service: 'OpenAI',   description: 'OpenAI API key' },
+  { key: 'API_Key',    service: 'Kraken',   description: 'Kraken API key' },
+  { key: 'API_Secret', service: 'Kraken',   description: 'Kraken API secret' },
+  { key: 'API_Key',    service: 'KuCoin',   description: 'KuCoin API key' },
+  { key: 'API_Secret', service: 'KuCoin',   description: 'KuCoin API secret' },
+];
+
+// Discord configuration (non-secret)
+const DefaultDiscord = [
+  { key: 'Enabled',          value: false, description: 'Enable Discord bot' },
+  { key: 'ClientID',         value: '',    description: 'Discord application Client ID' },
+  { key: 'GuildID',          value: '',    description: 'Discord server (guild) ID' },
+  { key: 'Staff_Role',       value: '',    description: 'Staff role ID for permission checks' },
+  { key: 'Warnings_Channel', value: '',    description: 'Channel ID for warning notifications' },
+  { key: 'Status_Channel',   value: '',    description: 'Channel ID for status updates' },
+];
+
+// Binance exchange configuration (non-secret)
+const DefaultBinance = [
+  { key: 'testnet',     value: false,      description: 'Use Binance testnet' },
+  { key: 'pair',        value: 'LTCUSDT',  description: 'Default trading pair' },
+  { key: 'baseAsset',   value: 'LTC',      description: 'Base asset ticker' },
+  { key: 'quoteAsset',  value: 'USDT',     description: 'Quote asset ticker' },
+  { key: 'quantity',    value: 0.1,         description: 'Default order quantity' },
+  { key: 'buyTarget',   value: 0.98,        description: 'Buy target ratio' },
+  { key: 'sellTarget',  value: 1.02,        description: 'Sell target ratio' },
+  { key: 'minNotional', value: 10,          description: 'Minimum notional value for orders' },
 ];
 
 // ─── Execution ──────────────────────────────────────────────────────────────
@@ -384,7 +490,11 @@ async function NukeDatabase(conn) {
 async function CreateTables(conn) {
   console.log('[Database] Creating tables...');
   // Order matters due to foreign keys: Decisions first, then Actions/Snapshots that reference it
-  const ordered = ['Settings', 'Decisions', 'Loops', 'Actions', 'Snapshots', 'Cranks', 'History', 'Pairs'];
+  const ordered = [
+    'Settings', 'Secrets', 'Discord',
+    'Binance', 'Kraken', 'KuCoin', 'UniSwap', 'PancakeSwap', 'Raydium',
+    'Decisions', 'Loops', 'Actions', 'Snapshots', 'Cranks', 'History', 'Pairs',
+  ];
   for (const name of ordered) {
     try {
       await conn.query(Tables[name]);
@@ -445,7 +555,72 @@ async function SeedSettings(conn) {
     }
   }
 
-  console.log(`  ${inserted} inserted, ${skipped} unchanged\n`);
+  console.log(`  Settings: ${inserted} inserted, ${skipped} unchanged`);
+}
+
+/**
+ * Seed default secrets into Secrets table
+ */
+async function SeedSecrets(conn) {
+  let inserted = 0;
+  let skipped = 0;
+
+  for (const secret of DefaultSecrets) {
+    try {
+      const sql = `
+        INSERT INTO Secrets (\`key\`, \`value\`, service, description)
+        VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE updated_at = updated_at
+      `;
+      const result = await conn.query(sql, [secret.key, JSON.stringify(''), secret.service, secret.description || null]);
+      if (result.affectedRows > 0 && result.warningCount === 0) inserted++;
+      else skipped++;
+    } catch (err) {
+      console.error(`  ✗ Secrets.${secret.service}.${secret.key}: ${err.message}`);
+    }
+  }
+
+  console.log(`  Secrets: ${inserted} inserted, ${skipped} unchanged`);
+}
+
+/**
+ * Seed defaults into a simple key/value table (Discord, Binance, etc.)
+ */
+async function SeedKeyValueTable(conn, tableName, defaults) {
+  let inserted = 0;
+  let skipped = 0;
+
+  for (const item of defaults) {
+    try {
+      const jsonValue = JSON.stringify(item.value);
+      const sql = `
+        INSERT INTO \`${tableName}\` (\`key\`, \`value\`, description)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          \`value\` = IF(\`value\` = VALUES(\`value\`), \`value\`, \`value\`),
+          updated_at = updated_at
+      `;
+      const result = await conn.query(sql, [item.key, jsonValue, item.description || null]);
+      if (result.affectedRows > 0 && result.warningCount === 0) inserted++;
+      else skipped++;
+    } catch (err) {
+      console.error(`  ✗ ${tableName}.${item.key}: ${err.message}`);
+    }
+  }
+
+  console.log(`  ${tableName}: ${inserted} inserted, ${skipped} unchanged`);
+}
+
+/**
+ * Seed all tables
+ */
+async function SeedAll(conn) {
+  console.log('[Database] Seeding defaults...');
+  await SeedSettings(conn);
+  await SeedSecrets(conn);
+  await SeedKeyValueTable(conn, 'Discord', DefaultDiscord);
+  await SeedKeyValueTable(conn, 'Binance', DefaultBinance);
+  console.log('');
 }
 
 /**
@@ -470,7 +645,7 @@ async function Run() {
 
     // Always seed on --nuke or --seed
     if (doNuke || doSeed) {
-      await SeedSettings(conn);
+      await SeedAll(conn);
     }
 
     console.log('[Database] Schema setup complete.');
@@ -483,7 +658,12 @@ async function Run() {
 }
 
 // Export for programmatic use
-module.exports = { GetConnection, NukeDatabase, CreateTables, CreateViews, SeedSettings, DefaultSettings, Tables, Views };
+module.exports = {
+  GetConnection, NukeDatabase, CreateTables, CreateViews,
+  SeedSettings, SeedSecrets, SeedKeyValueTable, SeedAll,
+  DefaultSettings, DefaultSecrets, DefaultDiscord, DefaultBinance,
+  Tables, Views,
+};
 
 // Run if called directly
 if (require.main === module) {

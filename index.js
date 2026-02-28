@@ -197,7 +197,11 @@ async function SellAllPositions(binance) {
         if (!price || price <= 0) continue;
 
         const value = free * price;
-        if (value < 1) continue; // Skip dust
+        const minSellValue = Settings.Get('Trading.Rules.MinimumTradeValue', 5);
+        if (value < minSellValue) {
+          logger.log(`[SellAll] Skipping ${asset} — value $${value.toFixed(2)} below minimum $${minSellValue}`);
+          continue;
+        }
 
         logger.log(`[SellAll] Selling ${free} ${asset} (~$${value.toFixed(2)})`);
         const result = await binance.Sell(free, null, symbol);
@@ -554,11 +558,16 @@ async function RunTradingEngine() {
 
       // Check if trading is paused via Discord /stop command
       if (process.tradingPaused) {
-        logger.log('[LOOP] Trading paused via Discord. Waiting 10s...');
+        if (!process._pauseMessageShown) {
+          logger.log('[LOOP] Trading paused via Discord. Repeating pause check every 10s...');
+          process._pauseMessageShown = true;
+        }
         await new Promise(r => setTimeout(r, 10000));
         iterationNum--; // Don't count paused iterations
         continue;
       }
+      // Reset flag so the message shows again after next pause
+      process._pauseMessageShown = false;
 
       try {
         if (isInfiniteLoop) {
@@ -711,7 +720,7 @@ async function GracefulShutdown() {
       const conn = await Database.GetConnection();
       await Database.CreateTables(conn);
       await Database.CreateViews(conn);
-      await Database.SeedSettings(conn);
+      await Database.SeedAll(conn);
       conn.end();
       settingsLoaded = await Settings.Load();
     } catch (dbErr) {
@@ -748,6 +757,10 @@ async function GracefulShutdown() {
   if (discordReady) {
     process.discord = Discord;
   }
+
+  // Start paused — trading only begins when /start is used in Discord
+  process.tradingPaused = true;
+  console.log('[Trading] Starting PAUSED — use Discord /start command to begin trading.');
 
   // Run Trading Engine
   await RunTradingEngine();

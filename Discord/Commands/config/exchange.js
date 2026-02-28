@@ -1,133 +1,154 @@
 /**
- * /exchange — Add, view, or update exchange configuration.
+ * /exchange — Modal-based exchange configuration.
  *
- * Subcommands:
- *   /exchange view                  → Show current exchange config (redacted keys)
- *   /exchange set key:<k> value:<v> → Update a Binance.* setting
- *   /exchange test                  → Test the current Binance connection
+ * Opens a pre-filled modal with current Binance settings.
+ * On submit, validates and saves all changed fields.
+ * Secrets (API Key, API Secret) are stored separately in the Secrets table.
  */
 
-const { EmbedBuilder, MessageFlags } = require('discord.js');
+const {
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ActionRowBuilder,
+  EmbedBuilder,
+  MessageFlags,
+} = require('discord.js');
 const Settings = require('../../../Core/Settings.js');
 
 module.exports = {
   name: 'exchange',
-  description: 'View, configure, or test exchange connections',
+  description: 'Configure exchange settings (opens a modal)',
   type: 1,
   cooldown: 5000,
-  options: [
-    {
-      name: 'action',
-      description: 'What to do — view, set, or test',
-      type: 3, // STRING
-      required: true,
-      choices: [
-        { name: 'view', value: 'view' },
-        { name: 'set',  value: 'set'  },
-        { name: 'test', value: 'test' },
-      ],
-    },
-    {
-      name: 'key',
-      description: 'Binance setting key (e.g. API_Key, API_Secret, Sandbox)',
-      type: 3,
-      required: false,
-    },
-    {
-      name: 'value',
-      description: 'New value for the key',
-      type: 3,
-      required: false,
-    },
-  ],
 
+  // ── Slash command handler — shows the modal ─────────────────────────
   run: async (client, interaction) => {
-    const action = interaction.options.getString('action');
-    const key    = interaction.options.getString('key');
-    const value  = interaction.options.getString('value');
+    const modal = new ModalBuilder()
+      .setCustomId('exchange_modal')
+      .setTitle('Exchange Configuration');
 
-    switch (action) {
-      case 'view': return _view(interaction);
-      case 'set':  return _set(interaction, key, value);
-      case 'test': return _test(interaction);
-      default:
-        return interaction.reply({ content: 'Unknown action.', flags: [MessageFlags.Ephemeral] });
+    // Row 1 — API Key
+    const apiKeyField = new TextInputBuilder()
+      .setCustomId('api_key')
+      .setLabel('API Key')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('Binance API Key')
+      .setValue(redact(Settings.Get('Binance.API_Key', '')))
+      .setRequired(false);
+
+    // Row 2 — API Secret
+    const apiSecretField = new TextInputBuilder()
+      .setCustomId('api_secret')
+      .setLabel('API Secret')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('Binance API Secret')
+      .setValue(redact(Settings.Get('Binance.API_Secret', '')))
+      .setRequired(false);
+
+    // Row 3 — Trading Pair
+    const pairField = new TextInputBuilder()
+      .setCustomId('pair')
+      .setLabel('Default Trading Pair')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('e.g. LTCUSDT')
+      .setValue(String(Settings.Get('Binance.pair', 'LTCUSDT')))
+      .setRequired(false);
+
+    // Row 4 — Base Asset
+    const baseAssetField = new TextInputBuilder()
+      .setCustomId('base_asset')
+      .setLabel('Base Asset')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('e.g. LTC')
+      .setValue(String(Settings.Get('Binance.baseAsset', 'LTC')))
+      .setRequired(false);
+
+    // Row 5 — Sandbox (true/false)
+    const sandboxField = new TextInputBuilder()
+      .setCustomId('sandbox')
+      .setLabel('Testnet / Sandbox (true or false)')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('false')
+      .setValue(String(Settings.Get('Binance.testnet', false)))
+      .setRequired(false);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(apiKeyField),
+      new ActionRowBuilder().addComponents(apiSecretField),
+      new ActionRowBuilder().addComponents(pairField),
+      new ActionRowBuilder().addComponents(baseAssetField),
+      new ActionRowBuilder().addComponents(sandboxField),
+    );
+
+    await interaction.showModal(modal);
+  },
+
+  // ── Modal submit handler ────────────────────────────────────────────
+  handleModal: async (client, interaction) => {
+    const fields = {
+      api_key:    interaction.fields.getTextInputValue('api_key'),
+      api_secret: interaction.fields.getTextInputValue('api_secret'),
+      pair:       interaction.fields.getTextInputValue('pair'),
+      base_asset: interaction.fields.getTextInputValue('base_asset'),
+      sandbox:    interaction.fields.getTextInputValue('sandbox'),
+    };
+
+    const results = [];
+
+    // API Key — only save if it changed (not still redacted)
+    if (fields.api_key && !fields.api_key.includes('••••')) {
+      await Settings.Set('Binance.API_Key', fields.api_key.trim());
+      results.push('✅ API Key updated');
     }
+
+    // API Secret — only save if it changed
+    if (fields.api_secret && !fields.api_secret.includes('••••')) {
+      await Settings.Set('Binance.API_Secret', fields.api_secret.trim());
+      results.push('✅ API Secret updated');
+    }
+
+    // Trading Pair
+    if (fields.pair) {
+      const pair = fields.pair.trim().toUpperCase();
+      await Settings.Set('Binance.pair', pair);
+      // Auto-derive base/quote
+      const base = pair.replace(/USDT$|BTC$|ETH$|BNB$|BUSD$/i, '');
+      const quote = pair.replace(base, '');
+      await Settings.Set('Binance.baseAsset', base);
+      await Settings.Set('Binance.quoteAsset', quote);
+      results.push(`✅ Pair → ${pair} (${base}/${quote})`);
+    }
+
+    // Base Asset (manual override)
+    if (fields.base_asset && !fields.pair) {
+      await Settings.Set('Binance.baseAsset', fields.base_asset.trim().toUpperCase());
+      results.push(`✅ Base Asset → ${fields.base_asset.trim().toUpperCase()}`);
+    }
+
+    // Sandbox
+    if (fields.sandbox) {
+      const raw = fields.sandbox.trim().toLowerCase();
+      if (raw === 'true' || raw === 'false') {
+        const val = raw === 'true';
+        await Settings.Set('Binance.testnet', val);
+        results.push(`✅ Testnet → ${val}`);
+      } else {
+        results.push('❌ Sandbox must be true/false');
+      }
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('Exchange Settings Updated')
+      .setColor(results.some(r => r.startsWith('❌')) ? 0xFF9900 : 0x00FF00)
+      .setDescription(results.length > 0 ? results.join('\n') : 'No changes made.')
+      .setTimestamp();
+
+    return interaction.reply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
   },
 };
 
-// ─── View ─────────────────────────────────────────────────────────────────
-
-async function _view(interaction) {
-  const apiKey    = Settings.Get('Binance.API_Key', '');
-  const apiSecret = Settings.Get('Binance.API_Secret', '');
-  const sandbox   = Settings.Get('Binance.Sandbox', false);
-
-  const redact = (s) => s ? `${s.slice(0, 4)}••••${s.slice(-4)}` : '(not set)';
-
-  const embed = new EmbedBuilder()
-    .setTitle('Exchange Configuration')
-    .setColor(0x3498DB)
-    .addFields(
-      { name: 'API Key',    value: `\`${redact(apiKey)}\``,    inline: true },
-      { name: 'API Secret', value: `\`${redact(apiSecret)}\``, inline: true },
-      { name: 'Sandbox',    value: `${sandbox}`,               inline: true },
-    )
-    .setTimestamp();
-
-  return interaction.reply({ embeds: [embed], flags: [MessageFlags.Ephemeral] });
-}
-
-// ─── Set ──────────────────────────────────────────────────────────────────
-
-async function _set(interaction, key, value) {
-  if (!key || !value) {
-    return interaction.reply({ content: 'Both `key` and `value` are required for `set`.', flags: [MessageFlags.Ephemeral] });
-  }
-
-  const allowed = ['API_Key', 'API_Secret', 'Sandbox'];
-  if (!allowed.includes(key)) {
-    return interaction.reply({
-      content: `Invalid key. Allowed: ${allowed.map(k => `\`${k}\``).join(', ')}`,
-      flags: [MessageFlags.Ephemeral],
-    });
-  }
-
-  let parsed;
-  try { parsed = JSON.parse(value); } catch (_) { parsed = value; }
-
-  const fullKey = `Binance.${key}`;
-  const success = await Settings.Set(fullKey, parsed);
-
-  if (success) {
-    return interaction.reply({ content: `✅ **${fullKey}** updated.`, flags: [MessageFlags.Ephemeral] });
-  }
-  return interaction.reply({ content: `❌ Failed to update **${fullKey}**.`, flags: [MessageFlags.Ephemeral] });
-}
-
-// ─── Test ─────────────────────────────────────────────────────────────────
-
-async function _test(interaction) {
-  await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
-
-  const binance = process.binance;
-  if (!binance) return interaction.editReply('Binance module not loaded.');
-
-  try {
-    const balances = await binance.GetBalances();
-    const usdt     = parseFloat(balances['USDT']?.free || 0);
-    const embed = new EmbedBuilder()
-      .setTitle('Exchange Connection Test')
-      .setColor(0x00FF00)
-      .setDescription(`✅ Connected — USDT balance: $${usdt.toFixed(2)}`)
-      .setTimestamp();
-    return interaction.editReply({ embeds: [embed] });
-  } catch (err) {
-    const embed = new EmbedBuilder()
-      .setTitle('Exchange Connection Test')
-      .setColor(0xFF0000)
-      .setDescription(`❌ Failed: ${err.message}`)
-      .setTimestamp();
-    return interaction.editReply({ embeds: [embed] });
-  }
+function redact(s) {
+  if (!s || s.length < 8) return s ? '••••' : '';
+  return `${s.slice(0, 4)}••••${s.slice(-4)}`;
 }
