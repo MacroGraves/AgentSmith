@@ -50,6 +50,17 @@ class TradeDB {
           entry_price DECIMAL(20, 8) COMMENT 'Entry price (for sell orders, the entry price of corresponding buy)',
           profit_loss DECIMAL(20, 8) COMMENT 'Profit/loss amount in USDT',
           profit_loss_percent DECIMAL(10, 4) COMMENT 'Profit/loss percentage',
+          fee_usdt DECIMAL(20, 8) COMMENT 'Estimated fee in USDT',
+          market_trend VARCHAR(20) COMMENT 'Market trend at time of trade (UPTREND/DOWNTREND/NEUTRAL)',
+          market_volatility DECIMAL(10, 4) COMMENT 'Pair volatility at time of trade',
+          market_volume_24h DECIMAL(30, 2) COMMENT 'Pair 24h volume at time of trade',
+          balance_before DECIMAL(20, 8) COMMENT 'USDT balance before trade',
+          balance_after DECIMAL(20, 8) COMMENT 'USDT balance after trade',
+          position_percent DECIMAL(10, 4) COMMENT 'Percentage of balance used for this trade',
+          gpt_confidence VARCHAR(20) COMMENT 'GPT decision confidence if available',
+          fsm_state VARCHAR(32) COMMENT 'FSM state at time of trade',
+          is_paper TINYINT(1) DEFAULT 0 COMMENT 'Whether this was a paper trade',
+          stop_loss_triggered TINYINT(1) DEFAULT 0 COMMENT 'Whether stop-loss triggered this sell',
           timestamp DATETIME NOT NULL COMMENT 'When trade was executed',
           loop_id VARCHAR(255) COMMENT 'Associated autonomous loop ID',
           decision_id VARCHAR(255) COMMENT 'Associated GPT decision ID',
@@ -61,7 +72,8 @@ class TradeDB {
           INDEX idx_action (action),
           INDEX idx_pair (pair),
           INDEX idx_loop_id (loop_id),
-          INDEX idx_status (status)
+          INDEX idx_status (status),
+          INDEX idx_is_paper (is_paper)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `;
 
@@ -99,8 +111,11 @@ class TradeDB {
         INSERT INTO ${this.tableName} (
           id, order_id, pair, action, quantity, price, total_value,
           entry_price, profit_loss, profit_loss_percent,
+          fee_usdt, market_trend, market_volatility, market_volume_24h,
+          balance_before, balance_after, position_percent,
+          gpt_confidence, fsm_state, is_paper, stop_loss_triggered,
           timestamp, loop_id, decision_id, status, notes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
           status = VALUES(status),
           updated_at = CURRENT_TIMESTAMP
@@ -117,6 +132,17 @@ class TradeDB {
         trade.entryPrice || null,
         trade.profitLoss || null,
         trade.profitLossPercent || null,
+        trade.feeUSDT || null,
+        trade.marketTrend || null,
+        trade.marketVolatility || null,
+        trade.marketVolume24h || null,
+        trade.balanceBefore || null,
+        trade.balanceAfter || null,
+        trade.positionPercent || null,
+        trade.gptConfidence || null,
+        trade.fsmState || null,
+        trade.isPaper ? 1 : 0,
+        trade.stopLossTriggered ? 1 : 0,
         trade.timestamp || new Date(),
         trade.loopId || null,
         trade.decisionId || null,

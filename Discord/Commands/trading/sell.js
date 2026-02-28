@@ -1,4 +1,5 @@
 const { EmbedBuilder } = require('discord.js');
+const Settings = require('../../../Core/Settings.js');
 
 module.exports = {
   name: 'sell',
@@ -25,6 +26,7 @@ module.exports = {
     const wasPaused = process.tradingPaused;
     process.tradingPaused = true;
     if (process.discord) process.discord.tradingPaused = true;
+    await Settings.Set('Trading.Paused', true);
 
     // ── Sell all ──────────────────────────────────────────────────
     if (pair.toLowerCase() === 'all') {

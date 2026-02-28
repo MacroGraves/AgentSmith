@@ -66,12 +66,7 @@ module.exports = async (client) => {
   try {
     const rest = new REST({ version: '10' }).setToken(token);
 
-    // Clear stale global and guild commands before re-registering
-    await rest.put(Routes.applicationCommands(clientId), { body: [] });
-    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: [] });
-    console.log('[Discord] Cleared old commands');
-
-    // Register fresh
+    // PUT is idempotent — replaces all guild commands in one call
     await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
       body: slashDefs,
     });

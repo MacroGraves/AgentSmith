@@ -1,4 +1,5 @@
 const { EmbedBuilder, MessageFlags } = require('discord.js');
+const Settings = require('../../../Core/Settings.js');
 
 module.exports = {
   name: 'start',
@@ -12,6 +13,7 @@ module.exports = {
 
     discord.tradingPaused  = false;
     process.tradingPaused  = false;
+    await Settings.Set('Trading.Paused', false);
     discord._updatePresence();
 
     const embed = new EmbedBuilder()

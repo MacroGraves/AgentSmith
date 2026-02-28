@@ -95,8 +95,15 @@ class Discord {
     this.client.once('clientReady', () => {
       console.log(`[Discord] Bot online as ${this.client.user.tag}`);
       this.ready = true;
-      this._updatePresence();
-      this._startStatusLoop();
+
+      const motdEnabled = Settings.Get('System.MOTD.Enabled', true);
+      if (motdEnabled) {
+        // MOTD controls presence — skip the other two
+        this._startMOTDLoop();
+      } else {
+        this._updatePresence();
+        this._startStatusLoop();
+      }
     });
 
     // Interaction handler — slash commands, modals, buttons
@@ -174,11 +181,62 @@ class Discord {
     }
   }
 
+  // ─── MOTD — Matrix-themed Status via GPT ───────────────────────────
+
+  /**
+   * Generate a Matrix-themed MOTD using current weather.
+   * Returns { status, weather } or null on failure.
+   */
+  async _generateMOTD() {
+    try {
+      const Weather = require('../Core/Weather.js');
+      const city    = Settings.Get('System.Weather.City', 'Antarctica');
+
+      const weather = await Weather.GetWeather(city);
+
+      const status = `${weather.emoji} ${weather.temp_c}°C ${weather.condition} — ${weather.city}`;
+
+      return { status: status.substring(0, 128), weather };
+    } catch (err) {
+      console.error(`[Discord] MOTD generation failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Start the MOTD loop — generates a Matrix-themed status immediately,
+   * then refreshes every N minutes (default 15).
+   * Posts the MOTD to the status channel and updates bot presence.
+   */
+  async _startMOTDLoop() {
+    if (!Settings.Get('System.MOTD.Enabled', true)) return;
+
+    const intervalMs = (Settings.Get('System.MOTD.IntervalMinutes', 15)) * 60_000;
+
+    const refresh = async () => {
+      try {
+        const motd = await this._generateMOTD();
+        if (!motd) return;
+
+        // Update bot presence with the MOTD status
+        if (this.client?.user) {
+          this.client.user.setActivity(motd.status, { type: ActivityType.Playing });
+        }
+      } catch (err) {
+        console.error(`[Discord] MOTD refresh failed: ${err.message}`);
+      }
+    };
+
+    // Run immediately on boot, then on interval
+    await refresh();
+    this._motdInterval = setInterval(refresh, intervalMs);
+  }
+
   // ─── Presence / Status Loop ───────────────────────────────────────────
 
   _updatePresence() {
     if (!this.client?.user) return;
-    const status = this.tradingPaused ? 'PAUSED' : 'Trading';
+    const status = this.tradingPaused ? 'Scheming' : 'Trading';
     this.client.user.setActivity(status, { type: ActivityType.Watching });
   }
 
@@ -253,10 +311,10 @@ class Discord {
   }
 
   /**
-   * Send a warning to the configured warnings channel
+   * Send a warning to the status channel
    */
   async Warn(message) {
-    const channelId = Settings.Get('Discord.Warnings_Channel', '');
+    const channelId = Settings.Get('Discord.Status_Channel', '');
     if (!channelId) return;
 
     const embed = new EmbedBuilder()
@@ -272,6 +330,7 @@ class Discord {
 
   async Shutdown() {
     if (this.statusInterval) clearInterval(this.statusInterval);
+    if (this._motdInterval) clearInterval(this._motdInterval);
     if (this.client) {
       this.client.destroy();
       this.client = null;

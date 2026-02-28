@@ -101,6 +101,10 @@ const PairSelector = require('./Core/PairSelector.js');
 const AutoTrader = require('./Core/AutoTrader.js');
 const Cranks = require('./Core/Cranks.js');
 const Discord = require('./Discord');
+const API = require('./Core/API.js');
+const FSM = require('./Core/FSM.js');
+const StopLoss = require('./Core/StopLoss.js');
+const Metrics = require('./Core/Metrics.js');
 
 // ─── Logging Setup ──────────────────────────────────────────────────────────
 
@@ -226,12 +230,13 @@ async function SellAllPositions(binance) {
 
 async function TestBinanceConnection() {
   try {
-    const { apiKey, apiSecret } = KeyManager.LoadBinanceKey();
-    if (!apiKey || !apiSecret) {
-      logger.error('[Binance] API keys not found in .Keys/ directory.');
+    const keys = KeyManager.LoadBinanceKey();
+    if (!keys || !keys.apiKey || !keys.apiSecret) {
+      logger.error('[Binance] API keys not found in Secrets table. Use /exchange or insert directly.');
       return;
     }
-    logger.log('[Binance] API keys loaded successfully');
+    const { apiKey, apiSecret } = keys;
+    logger.log('[Binance] API keys loaded from database');
 
     const binanceConfig = Settings.Binance || {};
     const binance = new BinanceExchange({
@@ -450,7 +455,7 @@ async function RunTradingEngine() {
     // Check OpenAI key
     const openAIKey = KeyManager.LoadOpenAIKey();
     if (!openAIKey) {
-      logger.warn('[GPT] OpenAI.key not found in .Keys/. Cannot trade without GPT.');
+      logger.warn('[GPT] OpenAI API key not found in Secrets table. Cannot trade without GPT.');
       return;
     }
 
@@ -539,6 +544,9 @@ async function RunTradingEngine() {
     // Initialize AutoTrader
     const autoTrader = new AutoTrader(gpt, decisionDB, process.binance, tradeDB, cranks);
     process.autoTrader = autoTrader;
+    process.fsm = FSM;
+    process.stopLoss = StopLoss;
+    process.metrics = Metrics;
     logger.log('[AutoTrader] Initialized. Ready to accept trading commands.\n');
 
     // ── Trading Loop ──
@@ -576,10 +584,52 @@ async function RunTradingEngine() {
           logger.log(`\n[LOOP] Iteration ${iterationNum}/${iterationCount}`);
         }
 
+        // FSM gate: check if trading is allowed
+        if (!FSM.canTrade()) {
+          const fsmStatus = FSM.getStatus();
+          logger.warn(`[LOOP] FSM state: ${fsmStatus.state} — trading blocked. ${fsmStatus.haltReason || ''}`);
+          await new Promise(r => setTimeout(r, 30000));
+          iterationNum--;
+          continue;
+        }
+        FSM.transition('TRADING', `Iteration ${iterationNum}`);
+
         // Heartbeat every 10 iterations
         if (iterationNum % 10 === 0) {
           const uptimeMin = ((Date.now() - loopStartTime) / 60000).toFixed(1);
-          logger.log(`[HEARTBEAT] Uptime: ${uptimeMin}m | Iterations: ${iterationNum} | Trades: ${totalTrades} | Errors: ${consecutiveErrors}`);
+          const metricsSnap = Metrics.getSummary();
+          logger.log(`[HEARTBEAT] Uptime: ${uptimeMin}m | Iterations: ${iterationNum} | Trades: ${totalTrades} | Errors: ${consecutiveErrors} | Win Rate: ${metricsSnap.winRate} | Net P/L: $${metricsSnap.netProfitUSDT}`);
+        }
+
+        // ── Stop-Loss Check: scan all tracked positions before normal GPT cycle ──
+        const selectedPairForStopLoss = pairSelector.GetCurrentPair();
+        if (StopLoss.positions.size > 0) {
+          for (const [pair, pos] of StopLoss.positions.entries()) {
+            try {
+              const livePrice = await process.binance.GetPrice(pair);
+              const signal = StopLoss.check(pair, livePrice);
+              if (signal && signal.triggered) {
+                logger.log(`[STOP-LOSS] ${pair} triggered! Executing sell...`);
+                // Execute sell via AutoTrader (profit gate still applies)
+                const sellResult = await autoTrader.ExecuteAction({
+                  action: 'sell',
+                  quantity: signal.quantity,
+                  symbol: pair,
+                });
+                if (sellResult?.success) {
+                  StopLoss.untrack(pair);
+                  totalTrades++;
+                  Metrics.recordSell(pair, signal.quantity, livePrice,
+                    sellResult.profitLoss || 0, sellResult.profitLossPercent || 0);
+                  logger.log(`[STOP-LOSS] Sold ${pair}: P/L ${sellResult.profitLossPercent?.toFixed(2) || '?'}%`);
+                } else {
+                  logger.warn(`[STOP-LOSS] Sell failed for ${pair}: ${sellResult?.error || 'unknown'}`);
+                }
+              }
+            } catch (slErr) {
+              logger.warn(`[STOP-LOSS] Error checking ${pair}: ${slErr.message}`);
+            }
+          }
         }
 
         // Select pair intelligently
@@ -601,13 +651,27 @@ async function RunTradingEngine() {
 
         if (['buy', 'sell'].includes(actionTaken)) totalTrades++;
         consecutiveErrors = 0;
+        FSM.transition('IDLE', `Iteration ${iterationNum} complete — action: ${actionTaken}`);
+        FSM.clearAllErrors();
       } catch (iterationError) {
         consecutiveErrors++;
         logger.error(`[LOOP] Iteration ${iterationNum} failed: ${iterationError.message}`);
         if (iterationError.stack) logger.error(iterationError.stack);
 
+        // Route through FSM for structured recovery
+        const recovery = FSM.handleError(iterationError);
+        if (recovery.halted) {
+          logger.error(`[LOOP] FSM HALTED trading: ${recovery.recovery}`);
+          break;
+        }
+        if (recovery.retry && recovery.waitMs > 0) {
+          logger.log(`[LOOP] FSM recovery: waiting ${(recovery.waitMs / 1000).toFixed(0)}s before retry (${recovery.errorCode})`);
+          await new Promise(r => setTimeout(r, recovery.waitMs));
+        }
+
         if (consecutiveErrors >= maxConsecutiveErrors) {
           logger.error(`[LOOP] ${maxConsecutiveErrors} consecutive failures — stopping.`);
+          FSM.handleError('EXCESSIVE_LOSS'); // Escalate to HALTED
           break;
         }
         logger.log(`[LOOP] Continuing despite error (${consecutiveErrors}/${maxConsecutiveErrors})`);
@@ -674,6 +738,11 @@ async function GracefulShutdown() {
     // Close Discord bot
     if (process.discord?.Shutdown) {
       try { await process.discord.Shutdown(); } catch (_) {}
+    }
+
+    // Close API server
+    if (process.api?.Shutdown) {
+      try { await process.api.Shutdown(); } catch (_) {}
     }
 
     // Close Settings DB connection
@@ -758,8 +827,18 @@ async function GracefulShutdown() {
     process.discord = Discord;
   }
 
-  // Start paused — trading only begins when /start is used in Discord
+  // Initialize Express API server (optional)
+  if (Settings.Get('System.API.Enabled', false)) {
+    console.log('\n[API] Starting Express server...');
+    const apiReady = await API.Initialize();
+    if (apiReady) process.api = API;
+  }
+
+  // ALWAYS start paused on boot — user must /start to begin trading.
+  // Persist to DB so in-flight GPT decisions also see the paused state.
   process.tradingPaused = true;
+  await Settings.Set('Trading.Paused', true);
+  if (process.discord) process.discord.tradingPaused = true;
   console.log('[Trading] Starting PAUSED — use Discord /start command to begin trading.');
 
   // Run Trading Engine

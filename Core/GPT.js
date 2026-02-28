@@ -8,7 +8,7 @@ const KeyManager = require('./KeyManager.js');
  */
 class GPTWrapper {
   constructor(config = {}) {
-    // Load OpenAI key from .Keys/OpenAI.key if not provided in config
+    // Load OpenAI key from MySQL Secrets table if not provided in config
     const apiKey = config.apiKey || KeyManager.LoadOpenAIKey();
 
     this.config = {
@@ -47,7 +47,7 @@ class GPTWrapper {
     try {
       // Validate configuration
       if (!this.config.apiKey) {
-        throw new Error('API Key not found. Add OpenAI API key to .Keys/OpenAI.key');
+        throw new Error('API Key not found. Set OpenAI.API_Key in the Secrets table.');
       }
 
       // Create axios instance

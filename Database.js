@@ -281,6 +281,20 @@ const Tables = {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       COMMENT='Trading pair analysis and rotation tracking'
   `,
+
+  PairRejects: `
+    CREATE TABLE IF NOT EXISTS PairRejects (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      pair VARCHAR(50) NOT NULL COMMENT 'Trading pair that was rejected (e.g., XYZUSDT)',
+      base_asset VARCHAR(20) NOT NULL COMMENT 'Base asset (e.g., XYZ)',
+      score DECIMAL(10, 4) DEFAULT NULL COMMENT 'DYOR score at time of rejection',
+      reasons TEXT DEFAULT NULL COMMENT 'JSON array of rejection reasons',
+      rejected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT 'When the pair was rejected',
+      INDEX idx_pair (pair),
+      INDEX idx_rejected_at (rejected_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      COMMENT='Pairs rejected by DYOR validation — removed from active rotation'
+  `,
 };
 
 // ─── Views ──────────────────────────────────────────────────────────────────
@@ -365,8 +379,19 @@ const DefaultSettings = [
   { key: 'Trading.TrendThresholds.SellOnlyInUptrend',     value: true,  category: 'Trading', description: 'Restrict selling to uptrends only' },
   { key: 'Trading.TrendThresholds.MinVolatilityForTrade', value: 0.5,   category: 'Trading', description: 'Minimum volatility to consider trading' },
   { key: 'Trading.TrendThresholds.MaxVolatilityForTrade', value: 5.0,   category: 'Trading', description: 'Maximum volatility to consider trading' },
+  { key: 'Trading.TrendThresholds.MinVolume24h',          value: 1000000, category: 'Trading', description: 'Minimum 24h volume in USDT to consider trading' },
+
+  // ── Stop-Loss (Trailing Profit Protector) ──
+  { key: 'Trading.Rules.StopLoss.Enabled',             value: true,  category: 'Trading', description: 'Enable trailing stop-loss (profit-first, only arms after profit)' },
+  { key: 'Trading.Rules.StopLoss.ActivationPercent',   value: 3.0,   category: 'Trading', description: 'Profit % required to arm the stop-loss' },
+  { key: 'Trading.Rules.StopLoss.TrailPercent',         value: 2.0,   category: 'Trading', description: 'Retrace % from peak to trigger sell' },
+
+  // ── DYOR (Coin Validation) ──
+  { key: 'Trading.DYOR.Enabled',    value: true,  category: 'Trading', description: 'Enable DYOR coin validation before trading' },
+  { key: 'Trading.DYOR.MinScore',   value: 40,    category: 'Trading', description: 'Minimum DYOR score (0-100) to approve a coin' },
 
   // ── Trading Misc ──
+  { key: 'Trading.Paused',                     value: true,  category: 'Trading', description: 'Whether trading is paused (persisted across restarts)' },
   { key: 'Trading.Values_Only_Logging',         value: true,  category: 'Trading', description: 'Log only numerical values by default' },
   { key: 'Trading.Cranks.Enabled',              value: true,  category: 'Trading', description: 'Enable Cranks safety system' },
   { key: 'Trading.Cranks.ConversionThreshold',  value: 100,   category: 'Trading', description: 'USDC conversion threshold in dollars' },
@@ -392,8 +417,15 @@ const DefaultSettings = [
   { key: 'OnRestart.Sell_All',        value: false, category: 'OnRestart', description: 'Sell all open positions on restart' },
 
   // ── System ──
-  { key: 'System.Production', value: true, category: 'System', description: 'Production mode flag' },
-  { key: 'System.Debug',      value: true, category: 'System', description: 'Debug mode flag' },
+  { key: 'System.Production',     value: true,         category: 'System', description: 'Production mode flag' },
+  { key: 'System.Debug',          value: true,         category: 'System', description: 'Debug mode flag' },
+  { key: 'System.Weather.City',      value: 'Antarctica', category: 'System', description: 'City for weather lookups and MOTD' },
+  { key: 'System.Weather.Latitude',  value: '-82.8628',  category: 'System', description: 'Latitude for weather API (auto-set by /city)' },
+  { key: 'System.Weather.Longitude', value: '135.0000',  category: 'System', description: 'Longitude for weather API (auto-set by /city)' },
+  { key: 'System.API.Enabled',    value: false,        category: 'System', description: 'Enable Express API server' },
+  { key: 'System.API.Port',       value: 3000,         category: 'System', description: 'Express API server port' },
+  { key: 'System.MOTD.Enabled',   value: true,         category: 'System', description: 'Enable Matrix-themed MOTD in Discord' },
+  { key: 'System.MOTD.IntervalMinutes', value: 15,     category: 'System', description: 'Minutes between MOTD refreshes' },
 ];
 
 // Secrets — sensitive API keys, tokens, etc.
@@ -414,8 +446,7 @@ const DefaultDiscord = [
   { key: 'ClientID',         value: '',    description: 'Discord application Client ID' },
   { key: 'GuildID',          value: '',    description: 'Discord server (guild) ID' },
   { key: 'Staff_Role',       value: '',    description: 'Staff role ID for permission checks' },
-  { key: 'Warnings_Channel', value: '',    description: 'Channel ID for warning notifications' },
-  { key: 'Status_Channel',   value: '',    description: 'Channel ID for status updates' },
+  { key: 'Status_Channel',   value: '',    description: 'Channel ID for trade notifications, warnings, and status updates' },
 ];
 
 // Binance exchange configuration (non-secret)
@@ -468,7 +499,7 @@ async function NukeDatabase(conn) {
   // Drop legacy tables
   const legacyTables = [
     'gpt_action_log', 'gpt_auto_loops', 'gpt_decisions', 'gpt_market_snapshots',
-    'trading_cranks', 'trading_history', 'trading_pairs', 'transactions', 'wallets'
+    'trading_cranks', 'trading_history', 'trading_pairs', 'pair_rejects', 'transactions', 'wallets'
   ];
   for (const name of legacyTables) {
     await conn.query(`DROP TABLE IF EXISTS ${name}`);
@@ -493,7 +524,7 @@ async function CreateTables(conn) {
   const ordered = [
     'Settings', 'Secrets', 'Discord',
     'Binance', 'Kraken', 'KuCoin', 'UniSwap', 'PancakeSwap', 'Raydium',
-    'Decisions', 'Loops', 'Actions', 'Snapshots', 'Cranks', 'History', 'Pairs',
+    'Decisions', 'Loops', 'Actions', 'Snapshots', 'Cranks', 'History', 'Pairs', 'PairRejects',
   ];
   for (const name of ordered) {
     try {

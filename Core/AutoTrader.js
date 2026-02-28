@@ -6,6 +6,9 @@
 
 const Settings = require('./Settings.js');
 const TradeDB = require('./TradeDB.js');
+const FSM = require('./FSM.js');
+const StopLoss = require('./StopLoss.js');
+const Metrics = require('./Metrics.js');
 
 class AutoTrader {
   constructor(gptWrapper, decisionDB, binanceExchange, tradeDB, cranks = null) {
@@ -313,6 +316,14 @@ class AutoTrader {
     try {
       const { quantity, price, symbol } = params;
 
+      // PAUSE GATE: Re-check pause state right before execution.
+      // The trading loop checks at the top, but /sell or /stop could have paused
+      // while GPT was mid-decision. This prevents stale buys from firing.
+      if (process.tradingPaused) {
+        console.log('   [Pause Gate] Trading was paused while GPT was deciding. Buy BLOCKED.');
+        return { success: false, action: 'buy', error: 'Trading paused before execution', paused: true };
+      }
+
       // quantity is optional when percent is provided — we compute it from percent below
       if (!quantity && !params.percent) {
         throw new Error('Buy action requires either quantity or percent parameter');
@@ -400,11 +411,11 @@ class AutoTrader {
         console.warn(`   [Account State Changed] USDT balance reduced from ~$${requiredUSDT.toFixed(2)} to $${availableUSDT.toFixed(2)} between decision and execution (50%+ change detected). Account may have been modified externally.`);
       }
       
-      // If purchase would exceed available balance, reduce quantity to fit
-      if (requiredUSDT > availableUSDT) {
-        console.log(`   [Quantity Adjustment Triggered] Required: $${requiredUSDT.toFixed(2)}, Available: $${availableUSDT.toFixed(2)}`);
-        const adjustedQuantity = Math.floor((availableUSDT * 0.99) / currentPrice * 10000000) / 10000000;
-        console.log(`   [Quantity Adjustment Calculation] (${availableUSDT.toFixed(2)} * 0.99) / ${currentPrice} = ${adjustedQuantity}`);
+      // If purchase would exceed position-sized cap, reduce quantity to fit
+      if (requiredUSDT > maxBuyUSDT) {
+        console.log(`   [Quantity Adjustment Triggered] Required: $${requiredUSDT.toFixed(2)}, Position cap: $${maxBuyUSDT.toFixed(2)} (${(effectivePercent * 100).toFixed(0)}% of $${availableUSDT.toFixed(2)})`);
+        const adjustedQuantity = Math.floor((maxBuyUSDT * 0.99) / currentPrice * 10000000) / 10000000;
+        console.log(`   [Quantity Adjustment Calculation] (${maxBuyUSDT.toFixed(2)} * 0.99) / ${currentPrice} = ${adjustedQuantity}`);
         
         if (adjustedQuantity <= 0) {
           const error = `Insufficient USDT balance: trying to buy ${quantity} asset costing $${requiredUSDT.toFixed(2)}, but only ${availableUSDT.toFixed(2)} USDT available. Action blocked.`;
@@ -487,11 +498,11 @@ class AutoTrader {
         usedRefreshedPrice = true;
         
         // Recalculate quantity with new price to ensure it still fits balance
-        const recalculatedQuantity = Math.floor((availableUSDT * 0.99) / refreshedPrice * 10000000) / 10000000;
+        const recalculatedQuantity = Math.floor((maxBuyUSDT * 0.99) / refreshedPrice * 10000000) / 10000000;
         const recalculatedQtyRounded = Math.floor(recalculatedQuantity * 1000) / 1000;
         
         if (recalculatedQtyRounded < correctedQuantity) {
-          console.log(`   [Quantity Readjustment] Price moved. Reducing quantity from ${correctedQuantity} to ${recalculatedQtyRounded} to fit new market price.`);
+          console.log(`   [Quantity Readjustment] Price moved. Reducing quantity from ${correctedQuantity} to ${recalculatedQtyRounded} to fit position cap $${maxBuyUSDT.toFixed(2)}.`);
           correctedQuantity = recalculatedQtyRounded;
         }
       } else {
@@ -501,13 +512,31 @@ class AutoTrader {
         usedRefreshedPrice = true;
       }
 
-      // FINAL SAFETY CHECK: Verify the corrected quantity doesn't exceed available balance
+      // FINAL SAFETY CHECK: Verify the corrected quantity doesn't exceed position cap OR available balance
       const finalRequiredUSDT = correctedQuantity * finalPrice;
-      console.log(`   [Final Check] Verified: ${correctedQuantity} ${buyBaseAsset} @ $${finalPrice.toFixed(2)} = $${finalRequiredUSDT.toFixed(2)} (available: $${availableUSDT.toFixed(2)}) [using ${usedRefreshedPrice ? 'refreshed' : 'original'} price]`);
+      const minBalanceForTrading = minUSDTForBuy * 2; // $10 — need at least 2 trades worth to reject
+      console.log(`   [Final Check] Verified: ${correctedQuantity} ${buyBaseAsset} @ $${finalPrice.toFixed(2)} = $${finalRequiredUSDT.toFixed(2)} (position cap: $${maxBuyUSDT.toFixed(2)}, available: $${availableUSDT.toFixed(2)}) [using ${usedRefreshedPrice ? 'refreshed' : 'original'} price]`);
       
-      if (finalRequiredUSDT > availableUSDT * 1.01) { // Allow 1% slip for rounding
-        const error = `CRITICAL: Final safety check FAILED! Attempting to buy $${finalRequiredUSDT.toFixed(2)} but only $${availableUSDT.toFixed(2)} available. Quantity: ${correctedQuantity} ${buyBaseAsset} @ $${finalPrice.toFixed(2)}. Order REJECTED.`;
-        console.error(`   [Safety Violation] ${error}`);
+      if (finalRequiredUSDT > maxBuyUSDT * 1.05) { // Allow 5% slip for rounding/price movement
+        // When balance is small, the position cap can be below the exchange minimum.
+        // Only hard-reject if we'd be spending more than half our balance (reckless),
+        // or if balance is below 2 trades worth (too low to trade safely at all).
+        if (availableUSDT < minBalanceForTrading) {
+          console.warn(`   [Safety] Balance $${availableUSDT.toFixed(2)} is below $${minBalanceForTrading.toFixed(0)} (2x min trade). Too low to trade safely. Order REJECTED.`);
+          return { success: false, action: 'buy', error: `Balance $${availableUSDT.toFixed(2)} too low for safe trading (need $${minBalanceForTrading.toFixed(0)}+)`, insufficientBalance: true };
+        }
+        if (finalRequiredUSDT > availableUSDT * 0.50) {
+          const error = `Buy $${finalRequiredUSDT.toFixed(2)} would use ${((finalRequiredUSDT / availableUSDT) * 100).toFixed(0)}% of balance $${availableUSDT.toFixed(2)} — exceeds 50% safety limit. Order REJECTED.`;
+          console.error(`   [Safety Violation] ${error}`);
+          return { success: false, action: 'buy', error };
+        }
+        // Position cap exceeded but order is small relative to balance — allow it (MinTrade bump scenario)
+        console.log(`   [Safety Override] Order $${finalRequiredUSDT.toFixed(2)} exceeds position cap $${maxBuyUSDT.toFixed(2)} but is within 50% of balance $${availableUSDT.toFixed(2)}. Allowing (MinTrade requirement).`);
+      }
+      
+      if (finalRequiredUSDT > availableUSDT * 1.01) {
+        const error = `CRITICAL: Buy $${finalRequiredUSDT.toFixed(2)} exceeds available balance $${availableUSDT.toFixed(2)}. Order REJECTED.`;
+        console.error(`   [Balance Violation] ${error}`);
         return { success: false, action: 'buy', error };
       }
 
@@ -550,9 +579,9 @@ class AutoTrader {
               const bumpQty = Math.ceil((minNotional * 1.05) / livePrice * 10000000) / 10000000;
               const bumpCost = bumpQty * livePrice;
 
-              if (bumpCost > availableUSDT) {
-                console.warn(`   [NOTIONAL Recovery] Can't afford bumped order ($${bumpCost.toFixed(2)} > $${availableUSDT.toFixed(2)}). Buy blocked.`);
-                return { success: false, action: 'buy', error: `NOTIONAL: need $${minNotional} but balance is $${availableUSDT.toFixed(2)}`, insufficientBalance: true };
+              if (bumpCost > maxBuyUSDT) {
+                console.warn(`   [NOTIONAL Recovery] Bumped order ($${bumpCost.toFixed(2)}) exceeds position cap ($${maxBuyUSDT.toFixed(2)}). Buy blocked.`);
+                return { success: false, action: 'buy', error: `NOTIONAL: need $${minNotional} but position cap is $${maxBuyUSDT.toFixed(2)}`, insufficientBalance: true };
               }
 
               console.log(`   [NOTIONAL Recovery] Retrying with ${bumpQty} ${buyBaseAsset} ($${bumpCost.toFixed(2)}) to clear $${minNotional} minimum...`);
@@ -575,28 +604,34 @@ class AutoTrader {
 
           case 'INSUFFICIENT_BALANCE':
             console.warn(`   [Binance] Insufficient balance on exchange. Stopping buy attempts.`);
+            FSM.handleError('INSUFFICIENT_BALANCE', { pair: symbol, action: 'buy' });
             return { success: false, action: 'buy', error: result.error, insufficientBalance: true };
 
           case 'LOT_SIZE':
           case 'MARKET_LOT_SIZE':
             console.warn(`   [Binance] Quantity ${correctedQuantity} rejected by LOT_SIZE filter. Order blocked.`);
+            FSM.handleError('LOT_SIZE', { pair: symbol, action: 'buy', quantity: correctedQuantity });
             return { success: false, action: 'buy', error: result.error };
 
           case 'PERCENT_PRICE':
           case 'PRICE_FILTER':
             console.warn(`   [Binance] Price filter rejection — market may be too volatile. Order blocked.`);
+            FSM.handleError('PERCENT_PRICE', { pair: symbol, action: 'buy' });
             return { success: false, action: 'buy', error: result.error };
 
           case 'MAX_ORDERS':
             console.warn(`   [Binance] Too many open orders. Waiting for existing orders to fill.`);
+            FSM.handleError('MAX_ORDERS', { pair: symbol, action: 'buy' });
             return { success: false, action: 'buy', error: result.error };
 
           case 'RATE_LIMIT':
             console.warn(`   [Binance] Rate limited by exchange. Will retry next iteration.`);
+            FSM.handleError('RATE_LIMIT', { pair: symbol, action: 'buy' });
             return { success: false, action: 'buy', error: result.error };
 
           case 'TIMESTAMP':
             console.warn(`   [Binance] Timestamp sync error. Check system clock.`);
+            FSM.handleError('TIMESTAMP', { pair: symbol, action: 'buy' });
             return { success: false, action: 'buy', error: result.error };
 
           default:
@@ -636,6 +671,12 @@ class AutoTrader {
           this.cranks.create(buyBaseAsset, buyCostUSD);
         }
       }
+
+      // Track position for trailing stop-loss
+      StopLoss.track(symbol || 'LTCUSDT', actualFillPrice, correctedQuantity);
+
+      // Record buy in performance metrics
+      Metrics.recordBuy(symbol || 'LTCUSDT', correctedQuantity, actualFillPrice);
 
       // Notify Discord of the buy
       try {
@@ -926,6 +967,15 @@ class AutoTrader {
           console.warn(`   [Cranks] Failed to update: ${cranksErr.message}`);
         }
       }
+
+      // Untrack from stop-loss (position closed)
+      StopLoss.untrack(symbol || 'LTCUSDT');
+
+      // Record sell in performance metrics
+      Metrics.recordSell(
+        symbol || 'LTCUSDT', correctedQuantity, actualSellPrice,
+        profitLoss || 0, profitLossPercent || 0
+      );
 
       // Notify Discord of the sell
       try {

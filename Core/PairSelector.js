@@ -1,25 +1,44 @@
 const PairDB = require('./PairDB.js');
+const Settings = require('./Settings.js');
+const DYOR = require('./DYOR.js');
 
 /**
  * Pair Selector Module
  * Intelligently chooses which trading pair to analyze/trade based on market metrics
+ * 
+ * Market Condition Filters (enforced from Settings.Trading.Rules.TrendThresholds):
+ *   - MinVolatilityForTrade: Skip pairs below this volatility (too flat)
+ *   - MaxVolatilityForTrade: Skip pairs above this volatility (too risky)
+ *   - MinVolume24h: Skip pairs with insufficient 24h trading volume
+ *   - DYOR: Validate coins before first trade (CoinGecko + scam search)
  */
 class PairSelector {
   constructor(binanceExchange, pairDB) {
     this.binance = binanceExchange;
     this.pairDB = pairDB;
     this.commonPairs = [
-      'LTCUSDT', 'ETHUSDT', 'BTCUSDT', 'BNBUSDT', 
-      'ADAUSDT', 'XRPUSDT', 'DOGEUSDT', 'SOLUSDT',
-      'AVAXUSDT', 'UNIUSDT', 'LINKUSDT', 'MATICUSDT'
+      // ── Top 50 by market cap / liquidity on Binance ──
+      'BTCUSDT',  'ETHUSDT',  'BNBUSDT',  'SOLUSDT',  'XRPUSDT',
+      'ADAUSDT',  'DOGEUSDT', 'AVAXUSDT', 'DOTUSDT',  'LINKUSDT',
+      'MATICUSDT','UNIUSDT',  'LTCUSDT',  'ATOMUSDT', 'NEARUSDT',
+      'FTMUSDT',  'ALGOUSDT', 'XLMUSDT',  'VETUSDT',  'MANAUSDT',
+      'SANDUSDT', 'AXSUSDT',  'AAVEUSDT', 'ICPUSDT',  'FILUSDT',
+      'THETAUSDT','EGLDUSDT', 'HBARUSDT', 'XTZUSDT',  'EOSUSDT',
+      'FLOWUSDT', 'CHZUSDT',  'APEUSDT',  'LDOUSDT',  'CRVUSDT',
+      'ARUSDT',   'GRTUSDT',  'MKRUSDT',  'SNXUSDT',  'COMPUSDT',
+      'IMXUSDT',  'INJUSDT',  'OPUSDT',   'ARBUSDT',  'APTUSDT',
+      'SUIUSDT',  'SEIUSDT',  'TIAUSDT',  'WLDUSDT',  'JUPUSDT',
     ];
     this.lastSelectedPair = null;
     this.recentBuys = new Map(); // pair → timestamp of last buy (cooldown tracking)
     this.buyCooldownMs = 15 * 60 * 1000; // 15 minute cooldown after buying a pair
+    this.dyorApproved = new Set(); // Pairs that passed DYOR validation
   }
 
   /**
-   * Initialize pairs database
+   * Initialize pairs database and run DYOR validation.
+   * Inserts all 50 common pairs, then validates each one.
+   * Pairs that fail DYOR are removed from Pairs and logged to PairRejects.
    * @returns {Promise<boolean>}
    */
   async Initialize() {
@@ -30,6 +49,10 @@ class PairSelector {
       // Use InitializePair to avoid setting last_checked (keeps pairs "unchecked")
       if (initialized) {
         for (const pair of this.commonPairs) {
+          // Skip if already rejected previously
+          const rejected = await this.pairDB.IsRejected(pair);
+          if (rejected) continue;
+
           await this.pairDB.InitializePair(pair, {
             baseAsset: pair.substring(0, pair.length - 4),
             quoteAsset: 'USDT',
@@ -37,8 +60,40 @@ class PairSelector {
           });
         }
       }
+
+      // ── DYOR Startup Validation ───────────────────────────────────────────
+      // Validate ALL active pairs at boot. Remove unacceptable ones.
+      const dyorEnabled = Settings.Get('Trading.DYOR.Enabled', true);
+      if (dyorEnabled) {
+        const allPairs = await this.pairDB.GetAllPairs('score');
+        console.log(`[PairSelector] Running DYOR validation on ${allPairs.length} active pairs...`);
+
+        for (const p of allPairs) {
+          if (this.dyorApproved.has(p.id)) continue;
+
+          const baseAsset = p.id.replace(/USDT$|BTC$|ETH$|BNB$|BUSD$/i, '');
+          try {
+            const result = await DYOR.Validate(baseAsset, this.binance);
+            if (result.approved) {
+              this.dyorApproved.add(p.id);
+            } else {
+              // REJECTED — remove from Pairs, log to PairRejects
+              await this.pairDB.RejectPair(p.id, result.score, result.reasons);
+              console.log(`[DYOR] ${p.id} REJECTED (score: ${result.score}) — removed from active pairs`);
+            }
+          } catch (err) {
+            // DYOR failure is non-fatal — approve by default so we don't nuke pairs on network blips
+            console.warn(`[DYOR] Validation failed for ${p.id}: ${err.message} — approving by default`);
+            this.dyorApproved.add(p.id);
+          }
+        }
+
+        const activePairCount = await this.pairDB.GetActivePairCount();
+        console.log(`[PairSelector] DYOR complete: ${activePairCount} pairs approved, ${allPairs.length - activePairCount} rejected`);
+      }
       
-      console.log('[PairSelector] Initialized with ' + this.commonPairs.length + ' common pairs');
+      const finalCount = await this.pairDB.GetActivePairCount();
+      console.log(`[PairSelector] Initialized with ${finalCount} active trading pairs`);
       return initialized;
     } catch (error) {
       console.error('[PairSelector] Initialization failed:', error.message);
@@ -115,9 +170,77 @@ class PairSelector {
       // Sort by score descending
       pairScores.sort((a, b) => b.score - a.score);
 
+      // ── Market Condition Filters ──────────────────────────────────────────
+      // Enforce volatility and volume thresholds from Settings
+      const trendThresholds = Settings.Trading?.Rules?.TrendThresholds || {};
+      const minVol = trendThresholds.MinVolatilityForTrade || 0.5;
+      const maxVol = trendThresholds.MaxVolatilityForTrade || 5.0;
+      const minVolume24h = trendThresholds.MinVolume24h || 1000000; // $1M default
+
+      const filteredPairs = pairScores.filter(p => {
+        const vol = p.metrics?.volatility || 0;
+        const vol24h = p.metrics?.volume24h || 0;
+
+        if (vol < minVol) {
+          console.log(`[PAIR FILTER] ${p.pair} SKIPPED — volatility ${vol.toFixed(2)}% below ${minVol}% minimum (too flat)`, { logType: 'pairs' });
+          return false;
+        }
+        if (vol > maxVol) {
+          console.log(`[PAIR FILTER] ${p.pair} SKIPPED — volatility ${vol.toFixed(2)}% above ${maxVol}% maximum (too risky)`, { logType: 'pairs' });
+          return false;
+        }
+        if (vol24h < minVolume24h) {
+          console.log(`[PAIR FILTER] ${p.pair} SKIPPED — 24h volume $${(vol24h/1000000).toFixed(2)}M below $${(minVolume24h/1000000).toFixed(2)}M minimum`, { logType: 'pairs' });
+          return false;
+        }
+        return true;
+      });
+
+      // If all pairs filtered out, fall back to full set (don't deadlock)
+      let scoredPool = filteredPairs.length > 0 ? filteredPairs : pairScores;
+      if (filteredPairs.length === 0 && pairScores.length > 0) {
+        console.warn('[PAIR FILTER] All pairs filtered out by market conditions — using unfiltered pool');
+      }
+
+      // ── DYOR Coin Validation ──────────────────────────────────────────────
+      // Validate candidates if not already approved. Rejects are REMOVED from DB.
+      const dyorEnabled = Settings.Get('Trading.DYOR.Enabled', true);
+      if (dyorEnabled) {
+        const dyorRejected = new Set();
+        for (const p of scoredPool) {
+          if (this.dyorApproved.has(p.pair)) continue;
+
+          try {
+            const baseAsset = p.pair.replace(/USDT$|BTC$|ETH$|BNB$|BUSD$/i, '');
+            const result = await DYOR.Validate(baseAsset, this.binance);
+            if (result.approved) {
+              this.dyorApproved.add(p.pair);
+            } else {
+              // REJECTED — remove from Pairs table, log to PairRejects
+              await this.pairDB.RejectPair(p.pair, result.score, result.reasons);
+              dyorRejected.add(p.pair);
+              console.log(`[DYOR] ${p.pair} REJECTED (score: ${result.score}) — removed from active pairs`, { logType: 'pairs' });
+            }
+          } catch (err) {
+            // DYOR failure is non-fatal — approve by default
+            console.warn(`[DYOR] Validation failed for ${p.pair}: ${err.message} — approving by default`);
+            this.dyorApproved.add(p.pair);
+          }
+        }
+
+        // Filter out rejected pairs from this cycle's selection pool
+        if (dyorRejected.size > 0) {
+          scoredPool = scoredPool.filter(p => !dyorRejected.has(p.pair));
+          if (scoredPool.length === 0) {
+            console.warn('[PairSelector] All candidates rejected by DYOR, defaulting to LTCUSDT');
+            return 'LTCUSDT';
+          }
+        }
+      }
+
       // Filter out pairs on buy cooldown (recently bought)
       const now = Date.now();
-      const availablePairs = pairScores.filter(p => {
+      const availablePairs = scoredPool.filter(p => {
         const lastBuy = this.recentBuys.get(p.pair);
         if (lastBuy && (now - lastBuy) < this.buyCooldownMs) {
           const remainMin = ((this.buyCooldownMs - (now - lastBuy)) / 60000).toFixed(1);
@@ -128,7 +251,7 @@ class PairSelector {
       });
 
       // If ALL pairs are on cooldown, use the full list (don't deadlock)
-      const selectionPool = availablePairs.length > 0 ? availablePairs : pairScores;
+      const selectionPool = availablePairs.length > 0 ? availablePairs : scoredPool;
 
       // Log ranking
       console.log(`[PAIR] Ranking: ${pairScores.map((p, i) => `${i+1}. ${p.pair}=${p.score.toFixed(1)}`).join(', ')}`, { logType: 'pairs' });

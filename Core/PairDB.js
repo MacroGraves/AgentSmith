@@ -24,6 +24,7 @@ class PairDB {
     try {
       this.connection = await Utils.Connection(MySQL, this.connection);
       await this.CreateTable();
+      await this.CreateRejectsTable();
       console.log('[PairDB] Initialized');
       return true;
     } catch (error) {
@@ -332,6 +333,106 @@ class PairDB {
     }
 
     return Math.min(Math.max(score, 0), 100);
+  }
+
+  // ─── Pair Rejects ───────────────────────────────────────────────────────────
+
+  /**
+   * Create the PairRejects table if it doesn't exist (called during Initialize)
+   */
+  async CreateRejectsTable() {
+    try {
+      const sql = `
+        CREATE TABLE IF NOT EXISTS PairRejects (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          pair VARCHAR(50) NOT NULL COMMENT 'Trading pair that was rejected',
+          base_asset VARCHAR(20) NOT NULL COMMENT 'Base asset (e.g., XYZ)',
+          score DECIMAL(10, 4) DEFAULT NULL COMMENT 'DYOR score at time of rejection',
+          reasons TEXT DEFAULT NULL COMMENT 'JSON array of rejection reasons',
+          rejected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT 'When the pair was rejected',
+          INDEX idx_pair (pair),
+          INDEX idx_rejected_at (rejected_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `;
+      await this._query(sql);
+    } catch (error) {
+      if (!error.message.includes('already exists')) {
+        console.error('[PairDB] Failed to create PairRejects table:', error.message);
+      }
+    }
+  }
+
+  /**
+   * Reject a pair: insert into PairRejects and DELETE from Pairs
+   * @param {string} pair - Trading pair (e.g. XYZUSDT)
+   * @param {number} score - DYOR score at rejection time
+   * @param {string[]} reasons - Array of rejection reason strings
+   * @returns {Promise<boolean>}
+   */
+  async RejectPair(pair, score, reasons = []) {
+    try {
+      const baseAsset = pair.replace(/USDT$|BTC$|ETH$|BNB$|BUSD$/i, '');
+
+      // Insert into PairRejects log
+      const insertSql = `
+        INSERT INTO PairRejects (pair, base_asset, score, reasons)
+        VALUES (?, ?, ?, ?)
+      `;
+      await this._query(insertSql, [pair, baseAsset, score, JSON.stringify(reasons)]);
+
+      // Remove from active Pairs table
+      const deleteSql = `DELETE FROM ${this.tableName} WHERE id = ?`;
+      await this._query(deleteSql, [pair]);
+
+      console.log(`[PairDB] REJECTED ${pair} (score: ${score}) — removed from Pairs, logged to PairRejects`);
+      return true;
+    } catch (error) {
+      console.error(`[PairDB] Failed to reject pair ${pair}:`, error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Check if a pair has already been rejected
+   * @param {string} pair - Trading pair
+   * @returns {Promise<boolean>}
+   */
+  async IsRejected(pair) {
+    try {
+      const sql = `SELECT id FROM PairRejects WHERE pair = ? LIMIT 1`;
+      const results = await this._query(sql, [pair]);
+      return results.length > 0;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Get all rejected pairs
+   * @returns {Promise<Array>}
+   */
+  async GetRejectedPairs() {
+    try {
+      const sql = `SELECT * FROM PairRejects ORDER BY rejected_at DESC`;
+      return await this._query(sql) || [];
+    } catch (error) {
+      console.error('[PairDB] Failed to get rejected pairs:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Get count of active (non-rejected) pairs
+   * @returns {Promise<number>}
+   */
+  async GetActivePairCount() {
+    try {
+      const sql = `SELECT COUNT(*) AS cnt FROM ${this.tableName} WHERE enabled = true`;
+      const results = await this._query(sql);
+      return results[0]?.cnt || 0;
+    } catch (error) {
+      return 0;
+    }
   }
 
   /**

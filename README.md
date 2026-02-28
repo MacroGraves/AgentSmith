@@ -106,17 +106,7 @@ npm install
 }
 ```
 
-2. Create API key files:
-
-```
-.Keys/
-  OpenAI.key          ← OpenAI API key (plain text)
-  Binance/
-    API.key           ← Binance API key
-    API.secret        ← Binance API secret
-```
-
-3. First run auto-creates all database tables and seeds defaults:
+2. First run auto-creates all database tables and seeds defaults:
 
 ```bash
 node index.js --loop
@@ -126,6 +116,15 @@ Or manually set up the schema:
 
 ```bash
 node Database.js --seed
+```
+
+3. Add your API keys to the **Secrets** table (or use the Discord `/exchange` command after first boot):
+
+```sql
+INSERT INTO Secrets (`key`, value, service) VALUES ('API_Key',    '"your-binance-api-key"',    'Binance');
+INSERT INTO Secrets (`key`, value, service) VALUES ('API_Secret', '"your-binance-api-secret"', 'Binance');
+INSERT INTO Secrets (`key`, value, service) VALUES ('API_Key',    '"sk-your-openai-key"',      'OpenAI');
+INSERT INTO Secrets (`key`, value, service) VALUES ('Token',      '"your-discord-bot-token"',  'Discord');
 ```
 
 4. Configure Discord (optional) — set values in the Discord and Secrets tables via MySQL or the `/config` command after first run.
@@ -237,6 +236,7 @@ All tables are auto-created on first run. Use `node Database.js --nuke` to drop 
 | **Cranks** | Cranks safety system — cascading profit ratchets |
 | **History** | Executed trade history (buy/sell orders) |
 | **Pairs** | Trading pair analysis and rotation tracking |
+| **PairRejects** | Pairs rejected by DYOR validation — removed from active rotation |
 
 ### Views
 
@@ -265,7 +265,11 @@ AgentSmith/
 │   ├── Settings.js             Multi-table settings loader (singleton)
 │   ├── TradeDB.js              Trade history persistence
 │   ├── PairDB.js               Pair analysis persistence
-│   ├── PairSelector.js         Intelligent pair rotation
+│   ├── PairSelector.js         Intelligent pair rotation (50 pairs, DYOR-filtered)
+│   ├── DYOR.js                 Coin validator — CoinGecko + scam search via proxies
+│   ├── FSM.js                  Finite state machine for error handling
+│   ├── StopLoss.js             Trailing profit protector (arms after threshold)
+│   ├── Metrics.js              Performance tracking (win rate, P/L, Sharpe ratio)
 │   ├── Cranks.js               Cascading profit lockup system
 │   ├── MarketAnalysis.js       Technical analysis helpers
 │   ├── KeyManager.js           API key file loader
@@ -301,18 +305,14 @@ AgentSmith/
 │   ├── Core.js
 │   ├── Transactions.js
 │   └── Users.js
-│
-└── .Keys/                      API key files (gitignored)
-    ├── OpenAI.key
-    └── Binance/
-        ├── API.key
-        └── API.secret
 ```
 
 ---
 
 ## Safety Features
 
+- **DYOR Coin Validation** — Every pair is validated via CoinGecko + DuckDuckGo scam search at startup; rejects are permanently removed from the Pairs table and logged to PairRejects
+- **Proxy Rotation** — DYOR web requests consume proxies from `Proxies.txt` (burn-after-reading)
 - **Strict Loss Prevention** — Never sells at a loss; minimum 4% profit gate enforced at execution
 - **Position Size Cap** — Hard maximum 20% of balance per trade (GPT controls 5–20%)
 - **Cranks Lockup** — Profits cascade toward permanent USDC conversion
@@ -321,6 +321,8 @@ AgentSmith/
 - **External Modification Detection** — Halts trading if account is modified outside the bot
 - **Consecutive Error Limit** — Stops after 5 consecutive failures
 - **Per-Pair Buy Cooldown** — Prevents rapid-fire buying on the same pair
+- **Trailing Stop-Loss** — Arms after profit threshold, trails from peak, auto-sells on retrace
+- **FSM Error Handling** — Finite state machine classifies errors and manages recovery states
 
 ---
 
